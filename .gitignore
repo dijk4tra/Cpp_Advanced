@@ -1,0 +1,25 @@
+# 编译产物
+*.o
+*.out
+*.exe
+*.so
+*.a
+
+# CMake
+build/
+cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+Makefile
+cmake_install.cmake
+
+# 临时文件
+*.log
+*.tmp
+
+# 编辑器配置
+.vscode/
+.idea/
+
+# 系统文件
+.DS_Store
