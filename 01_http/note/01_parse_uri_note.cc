@@ -1,15 +1,12 @@
 // 解析 URI
-//
 // URI 的完整格式：
-//
 // <scheme>://<authority><path>?<query>#<fragment>
+// <方案>://<主机信息><路径>?<查询参数>#<片段>
 //
 // 例如：
-//
 // http://localhost:8888/user/profile?id=10&name=yuwenjia#title
 //
 // 可以拆成：
-//
 // scheme    = http
 // authority = localhost:8888
 // path      = /user/profile

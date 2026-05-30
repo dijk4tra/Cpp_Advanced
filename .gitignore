@@ -20,6 +20,7 @@ cmake_install.cmake
 # 编辑器配置
 .vscode/
 .idea/
+.cursor/
 
 # 系统文件
 .DS_Store

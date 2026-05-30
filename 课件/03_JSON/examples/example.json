@@ -1,0 +1,17 @@
+{
+    "user": {
+        "name": "花生",
+        "age": 18,
+        "contacts": [
+          {
+            "type": "email",
+            "value": "peanut@example.com"
+          },
+          {
+            "type": "phone",
+            "value": "1234567890"
+          }
+        ],
+        "is_active": true
+      }
+}

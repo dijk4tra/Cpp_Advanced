@@ -1,0 +1,18 @@
+syntax = "proto3";  // proto2和proto3都可以, 推荐使用proto3
+
+// 定义请求消息
+message EchoRequest {
+    string message = 1;
+    string name = 2;
+};
+// 定义响应消息
+message EchoResponse {
+    string message = 1;
+}
+
+// 定义一个名字为 Example 的服务
+service Example {
+    // 定义一个名字叫Echo的rpc
+    rpc Echo(EchoRequest) returns (EchoResponse);
+    // 一个service（服务）中，可以定义多个rpc方法...
+}
