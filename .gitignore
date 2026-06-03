@@ -24,3 +24,7 @@ cmake_install.cmake
 
 # 系统文件
 .DS_Store
+
+# 其他
+.codex
+.agents
