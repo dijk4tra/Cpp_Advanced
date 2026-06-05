@@ -7,7 +7,7 @@
  * 3. GET /xxx 下载 resources 目录中的静态资源，下载前必须验证 Token。
  *
  */
-#include "../common.h"
+#include "common.h"
 #include "CryptoUtil.h"
 
 #include <cassert>
