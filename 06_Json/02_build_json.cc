@@ -1,4 +1,5 @@
 #include <iostream>
+#include <list>
 #include <nlohmann/json.hpp>
 
 using namespace std;
@@ -78,4 +79,22 @@ int main()
     d5["object"].emplace("currency", "USD");
     d5["object"].emplace("value", 2.33);
     cout << d5.dump(2) << endl;
+
+    // 5. STL容器可以轻松转换成JSON的数组或对象
+    // 数组: <-- array, vector, list, forward_list, deque, stack, queue
+    // 数组: <-- set, unordered_set, multiset, unordered_multiset
+    list<double>numbers ={3.141 ,2.728 ,1.414 ,1.681 ,0.577 };
+    json d6 = numbers;
+    cout << d6.dump(2) << endl; //[3.141,2.728,1.414,1.681,0.577]
+
+    // 对象: <-- map, unordered_map, multimap, unordered_multimap
+    map<string,string>couples = {
+        {"刘强东","章泽天"},
+        {"文章","马伊琍"},
+        {"李小璐","贾乃亮"},
+        {"马蓉","王宝强"}
+    };
+    json d7 = couples;
+    cout << d7.dump(2) << endl; // {"刘强东":"章泽天","文章":"马伊琍","李小璐":"贾乃亮","马蓉":"王宝强"}
+
 }

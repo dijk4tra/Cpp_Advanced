@@ -12,14 +12,18 @@
 
 #include <cassert>
 #include <cctype>
+#include <cstddef>
 #include <cstdlib>
+#include <fcntl.h>
 #include <iostream>
 #include <map>
 #include <string>
+#include <sys/stat.h>
 #include <vector>
 
 #include <workflow/HttpMessage.h>
 #include <workflow/HttpUtil.h>
+#include <workflow/MySQLMessage.h>
 #include <workflow/MySQLResult.h>
 #include <workflow/WFFacilities.h>
 #include <workflow/WFGlobal.h>
@@ -27,16 +31,13 @@
 #include <workflow/WFTask.h>
 #include <workflow/WFTaskFactory.h>
 #include <workflow/Workflow.h>
+#include <workflow/http_parser.h>
 
 using namespace std;
 using namespace std::placeholders;
 using namespace protocol;
 
-// MySQL 连接地址：
-// root:123456 是用户名和密码；
-// 127.0.0.1:3306 是本机 MySQL；
-// demo 是数据库名；
-// character_set=utf8mb4 用来避免中文乱码
+// MySQL 连接地址
 static const string MYSQL_URL = "mysql://root:123456@127.0.0.1:3306/demo?character_set=utf8mb4";
 
 // HTTP 服务监听端口
@@ -58,7 +59,7 @@ void set_text_response(HttpResponse* resp, const string& code, const string& bod
     // 统一返回普通文本，方便 curl 直接查看
     resp->set_header_pair("Content-Type", "text/plain; charset=utf-8");
 
-    // 把字符串追加到响应体中
+    // 把字符串追加到响应体
     resp->append_output_body(body);
 }
 
@@ -99,7 +100,7 @@ map<string, string> parse_form(const string& body)
     map<string, string> form;
     size_t begin = 0;
 
-    // 表单格式示例：username=alice&password=123456
+    // 表单格式示例: username=alice&password=123456
     while (begin < body.size()) {
         // 找到当前字段的结尾
         size_t end = body.find('&', begin);
@@ -179,7 +180,7 @@ string get_token_from_request(HttpRequest* req, const string& uri)
         return authorization.substr(bearer.size());
     }
 
-    // 为了方便测试，也支持 Authorization: xxxxx
+    // 为了方便测试, 也支持 Authorization: xxxxx
     if (!authorization.empty()) {
         return authorization;
     }
@@ -206,7 +207,6 @@ string get_token_from_request(HttpRequest* req, const string& uri)
 string get_resource_root()
 {
     static string root;
-
     // 第一次调用时判断 resources 目录在哪里
     if (root.empty()) {
         struct stat statbuf;
@@ -250,6 +250,7 @@ void register_callback(WFMySQLTask* task, HttpResponse* resp, string username)
     // 3. 注册成功
     cout << "[register] " << username << endl;
     set_text_response(resp, "200", "register success\n");
+
 }
 
 void login_callback(WFMySQLTask* task, HttpResponse* resp, string password)
@@ -287,7 +288,7 @@ void login_callback(WFMySQLTask* task, HttpResponse* resp, string password)
     user.hashcode = row[2].as_string();
     user.salt = row[3].as_string();
     if (!row[4].is_null()) {
-        user.createdAt = row[4].as_datetime();
+        user.createdAt = row[4].as_string();
     }
 
     // 4. 用“客户端传来的明文密码 + 数据库里的盐值”重新计算哈希
@@ -360,10 +361,10 @@ void handle_register(WFHttpTask* httpTask)
     string hashcode = CryptoUtil::hash_password(password, salt);
 
     // 5. 拼接 INSERT SQL
-    string query = "INSERT INTO tbl_user(username, password, salt) VALUES('"
-                 + sql_escape(username) + "', '"
-                 + sql_escape(hashcode) + "', '"
-                 + sql_escape(salt) + "')";
+    string query = "INSERT INTO tbl_user (username, password, salt) VALUES ('"
+                   + sql_escape(username) + "', '"
+                   + sql_escape(hashcode) + "', '"
+                   + sql_escape(salt) + "')";
 
     cout << "[sql] " << query << endl;
 
@@ -371,7 +372,8 @@ void handle_register(WFHttpTask* httpTask)
     WFMySQLTask* mysqlTask = WFTaskFactory::create_mysql_task(
         MYSQL_URL,
         3,
-        bind(register_callback, _1, resp, username));
+        bind(register_callback, _1, resp, username)
+    );
 
     // 7. 给 MySQL 任务设置 SQL
     mysqlTask->get_req()->set_query(query);
@@ -386,7 +388,7 @@ void handle_login(WFHttpTask* httpTask)
     HttpRequest* req = httpTask->get_req();
     HttpResponse* resp = httpTask->get_resp();
 
-    // 1. 读取表单参数
+    // 1. 读取表单数据
     string body = get_request_body(req);
     map<string, string> form = parse_form(body);
     string username = form["username"];
@@ -400,7 +402,7 @@ void handle_login(WFHttpTask* httpTask)
 
     // 3. 根据用户名查询用户
     string query = "SELECT id, username, password, salt, created_at "
-                   "FROM tbl_users "
+                   "FROM tbl_user "
                    "WHERE username = '" + sql_escape(username) + "' AND tomb = 0 "
                    "LIMIT 1";
 
@@ -410,7 +412,8 @@ void handle_login(WFHttpTask* httpTask)
     WFMySQLTask* mysqlTask = WFTaskFactory::create_mysql_task(
         MYSQL_URL,
         3,
-        bind(login_callback, _1, resp, password));
+        bind(login_callback, _1, resp, password)
+    );
 
     // 5. 设置 SQL
     mysqlTask->get_req()->set_query(query);
@@ -440,7 +443,7 @@ void handle_static_file(WFHttpTask* httpTask, string path)
     cout << "[file] " << filePath << endl;
 
     // 4. 取得文件名，用于 Content-Disposition
-    size_t pos = filePath.find_last_of('/');
+    size_t pos = filePath.find_last_of("/");
     string filename = filePath.substr(pos + 1);
 
     // 5. 打开文件
@@ -476,7 +479,7 @@ void handle_static_file(WFHttpTask* httpTask, string path)
 
     // 9. HTTP 响应发送结束后释放 buf
     httpTask->set_callback([buf](WFHttpTask*) {
-        free(buf);
+       free(buf);
     });
 
     // 10. 创建异步 pread 任务
@@ -491,6 +494,7 @@ void handle_static_file(WFHttpTask* httpTask, string path)
     series_of(httpTask)->push_back(preadTask);
 }
 
+
 void process(WFHttpTask* httpTask)
 {
     // 1. 解析 HTTP 请求
@@ -500,7 +504,7 @@ void process(WFHttpTask* httpTask)
     string uri = req->get_request_uri();
 
     // 2. 设置响应头
-    resp->add_header_pair("Server", "Static Resource Server");
+    resp->set_header_pair("Server", "Static Resource Server");
 
     // 3. 把 URL 中 ? 后面的查询字符串去掉，只留下路径
     size_t queryPos = uri.find('?');
@@ -514,8 +518,6 @@ void process(WFHttpTask* httpTask)
             set_text_response(resp, "405", "method not allowed\n");
             return;
         }
-        handle_register(httpTask);
-        return;
     }
 
     // 5. 登录接口：POST /login
@@ -551,9 +553,10 @@ void process(WFHttpTask* httpTask)
     handle_static_file(httpTask, path);
 }
 
+
 int main()
 {
-    // 让 rand() 每次运行时产生不同的随机序列，用于生成 salt
+    // 让 rand() 每次运行时产生不同的随机序列, 用于生成 salt
     srand(time(NULL));
 
     // 注册 Ctrl+C 信号处理函数
@@ -569,7 +572,6 @@ int main()
 
         // 主线程阻塞在这里，直到 Ctrl+C 触发 waitGroup.done()
         waitGroup.wait();
-
         // 停止服务器
         server.stop();
     } else {
