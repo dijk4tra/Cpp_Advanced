@@ -1,5 +1,6 @@
 #include <iostream>
 #include <vector>
+#include <string>
 #include <nlohmann/json.hpp>
 
 using namespace std;
@@ -29,25 +30,36 @@ int main() {
     json data = json::parse(str);
     cout << data.dump(2) << endl;
 
+    // 创建并初始化Book对象
     Book book; // C++对象
     book.title = data["book"]["title"];
     book.author = data["book"]["author"];
     book.price = data["book"]["price"];
     book.publisher = data["book"]["publisher"];
+    book.tags = data["book"]["tags"];
 
-    for (const auto& tag : data["book"]["tags"]) {
-        book.tags.push_back(tag);
-    }
+    // for (const auto& tag : data["book"]["tags"]) {
+    //     book.tags.push_back(tag);
+    // }
 
-    cout << "title: " << book.title << endl;
-    cout << "author: " << book.author << endl;
-    cout << "price: " << book.price << endl;
-    cout << "publisher: " << book.publisher << endl;
-    cout << "tags: ";
-    for (const auto& tag : book.tags) {
-        cout << tag << " ";
-    }
-    cout << endl;
+    // 打印书名、价格和标签
+        cout << "title: " << book.title
+             << ", price: " << book.price
+             << ", tags: [";
+
+        int ntags = book.tags.size();
+        for (int i = 0; i < ntags; ++i) {
+            if (i != ntags - 1) {
+                cout << book.tags[i] << ", ";
+            } else {
+                cout << book.tags[i] << "]" << endl;
+            }
+        }
+
+    // for (const auto& tag : book.tags) {
+    //     cout << tag << " ";
+    // }
+    // cout << endl;
 
     return 0;
 }

@@ -1,5 +1,6 @@
 #include <iostream>
 #include <vector>
+#include <string>
 #include <nlohmann/json.hpp>
 
 using namespace std;
@@ -18,6 +19,7 @@ struct Student {
 int main() {
     Student s = { 1001, "花生", 92, 95, 88, { "唱歌", "跳舞", "rap", "篮球" }, false };
 
+    // 构建json对象
     json data;
     data["id"] = s.id;
     data["name"] = s.name;

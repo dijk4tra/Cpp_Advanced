@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<library>
+    <book id="B001">
+        <title>三体</title>
+        <author>刘慈欣</author>
+        <year>2008</year>
+        <price currency="CNY">68.00</price>
+    </book>
+    <book id="B002">
+        <title>百年孤独</title>
+        <author>加西亚·马尔克斯</author>
+        <year>2011</year>
+        <price currency="CNY">55.00</price>
+    </book>
+</library>
