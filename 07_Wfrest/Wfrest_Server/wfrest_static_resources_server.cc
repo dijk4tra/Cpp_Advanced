@@ -8,11 +8,8 @@
 #include <vector>
 
 #include <workflow/MySQLResult.h>
-#include <workflow/WFGlobal.h>
-#include <workflow/WFFacilities.h>
-#include <workflow/WFTaskFactory.h>
-#include <workflow/Workflow.h>
 #include <wfrest/HttpServer.h>
+#include <workflow/WFFacilities.h>
 #include <nlohmann/json.hpp>
 
 #include "CryptoUtil.h"
@@ -40,11 +37,9 @@ void sig_handler(int)
 
     如果不处理，拼接 SQL 会变成：
     'abc'def'
-
     SQL 字符串会被提前截断，甚至有 SQL 注入风险。
 
     注意：正式项目应该用参数化查询。
-    但 workflow / wfrest 课堂作业里通常先用字符串拼接。
 */
 string escape_sql(const string& s)
 {
@@ -92,43 +87,6 @@ bool get_username_password(const HttpReq *req, string& username, string& passwor
     return !username.empty() && !password.empty();
 }
 
-void set_json_response(HttpResp *resp, int status, int code, const string& message)
-{
-    resp->set_status(status);
-
-    json result;
-    result["code"] = code;
-    result["message"] = message;
-
-    resp->String(result.dump());
-}
-
-bool handle_mysql_error(WFMySQLTask *task, HttpResp *resp, const string& action, bool username_conflict)
-{
-    if (task->get_state() != WFT_STATE_SUCCESS) {
-        string message = action + " failed: " +
-            WFGlobal::get_error_string(task->get_state(), task->get_error());
-        set_json_response(resp, HttpStatusInternalServerError, 500, message);
-        return true;
-    }
-
-    MySQLResponse *mysql_resp = task->get_resp();
-    if (mysql_resp->get_packet_type() == MYSQL_PACKET_ERROR) {
-        if (username_conflict && mysql_resp->get_error_code() == 1062) {
-            set_json_response(resp, HttpStatusConflict, 409, "用户名已存在");
-            return true;
-        }
-
-        string message = action + " failed: mysql error " +
-            to_string(mysql_resp->get_error_code()) + ": " +
-            mysql_resp->get_error_msg();
-        set_json_response(resp, HttpStatusInternalServerError, 500, message);
-        return true;
-    }
-
-    return false;
-}
-
 /*
     POST /register
 
@@ -139,19 +97,25 @@ bool handle_mysql_error(WFMySQLTask *task, HttpResp *resp, const string& action,
     4. INSERT INTO tbl_user
     5. 根据 MySQL 执行结果返回响应
 */
-void do_register(const HttpReq *req, HttpResp *resp, SeriesWork *series)
+void do_register(const HttpReq *req, HttpResp *resp)
 {
     string username;
     string password;
 
     if (!get_username_password(req, username, password)) {
-        set_json_response(resp, HttpStatusBadRequest, 400,
-                          "Bad Request: 请使用 username/password 表单字段");
+        resp->set_status(HttpStatusBadRequest);
+
+        json result;
+        result["code"] = 400;
+        result["message"] = "Bad Request: 请使用 username/password 表单字段";
+
+        resp->String(result.dump());
         return;
     }
 
     cout << "[register] username: " << username << endl;
 
+    // 注册前查重：这个用户名现在是否已经存在？
     string check_sql =
         "SELECT id FROM tbl_user "
         "WHERE username='" + escape_sql(username) + "' "
@@ -167,20 +131,26 @@ void do_register(const HttpReq *req, HttpResp *resp, SeriesWork *series)
         因为 MySQL 是异步任务，do_register() 返回后，
         局部变量 username/password 会销毁。
     */
-    WFMySQLTask *check_task = WFTaskFactory::create_mysql_task(
-        MYSQL_URL,
-        3,
-        [resp, username, password](WFMySQLTask *task) {
-        if (handle_mysql_error(task, resp, "register check user", false)) {
+    resp->MySQL(MYSQL_URL, check_sql, [resp, username, password](MySQLResultCursor *cursor) {
+        if (cursor->get_cursor_status() != MYSQL_STATUS_GET_RESULT) {
+            resp->set_status(HttpStatusInternalServerError);
+
+            json result;
+            result["code"] = 500;
+            result["message"] = "注册失败：数据库查询用户失败";
+
+            resp->String(result.dump());
             return;
         }
 
-        MySQLResponse *mysql_resp = task->get_resp();
-        MySQLResultCursor cursor(mysql_resp);
-        vector<MySQLCell> record;
+        if (cursor->get_rows_count() != 0) { // 在数据库中已有该用户名
+            resp->set_status(HttpStatusBadRequest);
 
-        if (cursor.fetch_row(record)) {
-            set_json_response(resp, HttpStatusConflict, 409, "用户名已存在");
+            json result;
+            result["code"] = 400;
+            result["message"] = "用户名已存在";
+
+            resp->String(result.dump());
             return;
         }
 
@@ -188,6 +158,7 @@ void do_register(const HttpReq *req, HttpResp *resp, SeriesWork *series)
         string salt = CryptoUtil::generate_salt();
         string hashcode = CryptoUtil::hash_password(password, salt);
 
+        // 注册插入：需要判断 INSERT 是否执行成功
         string insert_sql =
             "INSERT INTO tbl_user (username, password, salt) VALUES ('" +
             escape_sql(username) + "', '" +
@@ -196,11 +167,15 @@ void do_register(const HttpReq *req, HttpResp *resp, SeriesWork *series)
 
         cout << "[SQL] " << insert_sql << endl;
 
-        WFMySQLTask *insert_task = WFTaskFactory::create_mysql_task(
-            MYSQL_URL,
-            3,
-            [resp](WFMySQLTask *task) {
-            if (handle_mysql_error(task, resp, "register insert user", true)) {
+        resp->MySQL(MYSQL_URL, insert_sql, [resp](MySQLResultCursor *cursor) {
+            if (cursor->get_cursor_status() != MYSQL_STATUS_OK) { // INSERT 是否成功?
+                resp->set_status(HttpStatusInternalServerError);
+
+                json result;
+                result["code"] = 500;
+                result["message"] = "注册失败：数据库插入用户失败";
+
+                resp->String(result.dump());
                 return;
             }
 
@@ -210,13 +185,7 @@ void do_register(const HttpReq *req, HttpResp *resp, SeriesWork *series)
 
             resp->String(result.dump());
         });
-
-        insert_task->get_req()->set_query(insert_sql);
-        series_of(task)->push_back(insert_task);
     });
-
-    check_task->get_req()->set_query(check_sql);
-    series->push_back(check_task);
 }
 
 /*
@@ -230,7 +199,7 @@ void do_register(const HttpReq *req, HttpResp *resp, SeriesWork *series)
     5. 比对 hash
     6. 成功则生成 token
 */
-void do_login(const HttpReq *req, HttpResp *resp, SeriesWork *series)
+void do_login(const HttpReq *req, HttpResp *resp)
 {
     string username;
     string password;
@@ -243,6 +212,7 @@ void do_login(const HttpReq *req, HttpResp *resp, SeriesWork *series)
 
     cout << "[login] username: " << username << endl;
 
+    // 登录查询：这个用户名是否唯一地查到了一个用户？
     string sql =
         "SELECT id, username, password, salt, created_at "
         "FROM tbl_user "
@@ -259,19 +229,22 @@ void do_login(const HttpReq *req, HttpResp *resp, SeriesWork *series)
         MySQL 是异步任务，callback 未来才执行。
         所以不能用引用捕获 [&password]。
     */
-    WFMySQLTask *mysql_task = WFTaskFactory::create_mysql_task(
-        MYSQL_URL,
-        3,
-        [resp, password](WFMySQLTask *task) {
-        if (handle_mysql_error(task, resp, "login query user", false)) {
+    resp->MySQL(MYSQL_URL, sql, [resp, password](MySQLResultCursor *cursor) {
+        if (cursor->get_cursor_status() != MYSQL_STATUS_GET_RESULT ||
+            cursor->get_rows_count() != 1) { // 不是SELECT结果集或者没有唯一地查到一个用户
+            resp->set_status(HttpStatusBadRequest);
+
+            json result;
+            result["code"] = 400;
+            result["message"] = "用户名或密码错误";
+
+            resp->String(result.dump());
             return;
         }
 
-        MySQLResponse *mysql_resp = task->get_resp();
-        MySQLResultCursor cursor(mysql_resp);
         vector<MySQLCell> record;
 
-        if (cursor.fetch_row(record)) {
+        if (cursor->fetch_row(record)) {
             User user;
             user.id = record[0].as_int();
             user.username = record[1].as_string();
@@ -301,9 +274,6 @@ void do_login(const HttpReq *req, HttpResp *resp, SeriesWork *series)
 
         resp->String(result.dump());
     });
-
-    mysql_task->get_req()->set_query(sql);
-    series->push_back(mysql_task);
 }
 
 /*
@@ -368,13 +338,12 @@ bool is_safe_path(const string& path)
 /*
     GET /xxx
 
-    要求：
+    流程：
     1. 先校验 Token
     2. Token 不存在 / 无效 / 超时，返回 401
     3. Token 正确后，返回 resources 目录下的文件
 
     wfrest 里可以用 req->current_path() 获取当前请求路径。
-    wfrest 文档中也说明了 current_path 表示当前实际请求路径。
 */
 void do_send(const HttpReq *req, HttpResp *resp)
 {
@@ -418,10 +387,7 @@ void do_send(const HttpReq *req, HttpResp *resp)
 
     /*
         wfrest 推荐的文件返回方式是 resp->File(path)。
-        官方 Send File 文档也是这样写的：
-            resp->File("todo.txt");
-            resp->File("html/index.html");
-        这相当于把你原来手动 open + pread + append body 的过程封装起来了。
+        相当于把原来手动 open + pread + append body 的过程封装起来了。
     */
     resp->File(real_path);
 }
@@ -432,7 +398,7 @@ int main()
 
     srand(time(nullptr));
 
-    HttpServer svr;
+    HttpServer server;
 
     /*
         注册路由。
@@ -442,18 +408,18 @@ int main()
         POST /login
         GET  任意静态资源路径
     */
-    svr.POST("/register", do_register);
-    svr.POST("/login", do_login);
+    server.POST("/register", do_register);
+    server.POST("/login", do_login);
 
     // wfrest 支持通配路由。
     // 这里用 "/*" 接住所有 GET 请求。
-    // 也可以写成 "/{path}*" 这类形式，具体取决于你本机 wfrest 版本。
-    svr.GET("/*", do_send);
+    // 也可以写成 "/{path}*" 这类形式，具体取决于 wfrest 版本。
+    server.GET("/*", do_send);
 
-    if (svr.start(8888) == 0) {
+    if (server.start(8888) == 0) {
         cout << "wfrest static resource server is running at http://127.0.0.1:8888" << endl;
         waitGroup.wait();
-        svr.stop();
+        server.stop();
     } else {
         cerr << "ERROR: Server start FAILED!" << endl;
         exit(1);
