@@ -15,7 +15,8 @@
 
 class CloudDiskServer {
 public:
-    CloudDiskServer() { }
+    CloudDiskServer();
+    ~CloudDiskServer();
 
     // 注册路由
     void register_routes();

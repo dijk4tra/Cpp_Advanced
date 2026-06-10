@@ -1,10 +1,15 @@
 #include "CloudDiskServer.h"
 #include "CryptoUtil.h"
 #include "common.h"
-#include <filesystem>
-#include <fstream>
+#include <alibabacloud/oss/OssClient.h>
+#include <alibabacloud/oss/client/ClientConfiguration.h>
+#include <cmath>
+#include <cstdlib>
 #include <iostream>
+#include <memory>
 #include <nlohmann/json.hpp>
+#include <sstream>
+#include <stdexcept>
 #include <wfrest/PathUtil.h>
 #include <workflow/HttpUtil.h>
 #include <workflow/MySQLResult.h>
@@ -16,13 +21,35 @@ using namespace std::placeholders;
 using namespace wfrest;
 using namespace protocol;
 using json = nlohmann::json;
+namespace oss = AlibabaCloud::OSS;
 
 // 数据库的URL
 static const string DatabaseURL = "mysql://root:123456@localhost/CloudDisk";
 static const int RetryMax = 3;
 
-// 第一阶段先把用户文件保存在本地磁盘。后续阶段接入 OSS 时，再替换这里的存储方式。
-static const string FileStorageRoot = "./storage";
+/*
+    OSS 连接配置。
+
+    第二阶段不再把文件写到服务器本地磁盘，而是写入阿里云对象存储 OSS：
+    - endpoint/region/bucket 来自当前使用的 Bucket 所在地域
+    - accessKeyId/accessKeySecret 用来给 SDK 请求签名
+
+    这里从.env文件中获取accessKeyId/accessKeySecret等信息
+*/
+
+static string getEnvOrThrow(const char* name) {
+    const char* value = getenv(name);
+    if (value == nullptr || string(value).empty()) {
+        throw runtime_error(string("Missing environment variable: ") + name);
+    }
+    return string(value);
+}
+
+static const string OssEndpoint = getEnvOrThrow("ALIBABA_CLOUD_OSS_ENDPOINT");
+static const string OssAccessKeyId = getEnvOrThrow("ALIBABA_CLOUD_ACCESS_KEY_ID");
+static const string OssAccessKeySecret = getEnvOrThrow("ALIBABA_CLOUD_ACCESS_KEY_SECRET");
+static const string OssBucketName = getEnvOrThrow("ALIBABA_CLOUD_OSS_BUCKET");
+static const string OssRegion = getEnvOrThrow("ALIBABA_CLOUD_OSS_REGION");
 
 /*
     统一返回 JSON。
@@ -194,26 +221,194 @@ static bool check_login(const HttpReq* req, User& user)
 }
 
 /*
-    为每个用户准备单独的本地存储目录。
+    创建 OSS 客户端。
 
-    例如 uid=3 的用户，文件保存到：
-        ./storage/3/文件hash
+    OssClient 内部保存 endpoint、AccessKey 和连接配置。
+    这里每次上传/下载都创建一个轻量客户端对象，避免把客户端做成全局静态对象：
+    - 全局静态对象的析构顺序不直观，容易在 ShutdownSdk() 之后才析构
+    - 当前项目请求量较小，按请求创建客户端更容易理解，也足够满足教学项目需求
+
+    注意：真正的 SDK 网络资源由 InitializeSdk()/ShutdownSdk() 统一管理，
+    它们在 CloudDiskServer 构造/析构中各执行一次。
+
+    函数名前面的 static 只表示“这个函数只在当前 .cc 文件内部可见”，
+    不是说返回了一个静态全局 OssClient。每次调用本函数，都会新建一个 OssClient。
+
+    返回 unique_ptr 而不是直接返回 OssClient，是为了明确表达“这个客户端对象归调用者独占”，
+    并避免返回值过程中发生不必要的拷贝。OssClient 内部持有 SDK 实现对象，按指针管理
+    生命周期比值拷贝更直观。
 */
-static string user_storage_dir(int uid)
+static unique_ptr<oss::OssClient> create_oss_client()
 {
-    return FileStorageRoot + "/" + to_string(uid);
+    oss::ClientConfiguration conf;
+    /*
+        make_unique<oss::OssClient>(...) 等价于：
+            new oss::OssClient(endpoint, accessKeyId, accessKeySecret, conf)
+
+        但 make_unique 更安全：
+        - 不需要手写 delete
+        - 如果中途发生异常，已经创建的对象会自动释放
+        - 返回的 unique_ptr 明确表示这个对象只有一个拥有者
+
+        PDF 示例中的写法：
+            OssClient client(endpoint, accessKeyId, accessKeySecret, conf);
+
+        适合在 main() 里直接使用局部变量。这里需要从 create_oss_client() 函数
+        把客户端对象交给上传/下载函数使用，所以用 unique_ptr 作为返回值更方便。
+    */
+    auto client = make_unique<oss::OssClient>(
+        OssEndpoint,
+        OssAccessKeyId,
+        OssAccessKeySecret,
+        conf);
+    client->SetRegion(OssRegion);
+    return client;
 }
 
 /*
-    用 uid 和 hashcode 拼出本地文件路径。
+    生成 OSS ObjectName。
 
-    数据库 tbl_file 保存 filename 和 hashcode：
-    - filename：给用户看的原始文件名
-    - hashcode：后端保存文件时使用的文件名
+    OSS 中没有真正的目录，"users/3/abc123" 这样的路径只是对象名的一部分。
+    按 uid 分前缀有两个好处：
+    1. 不同用户的同一 hash 文件不会互相覆盖
+    2. 后续如果要按用户清理文件，可以直接按 users/{uid}/ 前缀列举对象
+
+    数据库仍然保存：
+    - filename：用户上传时的原始文件名，用于列表展示和下载文件名
+    - hashcode：文件内容 hash，用于定位 OSS 中的对象
 */
-static string storage_file_path(int uid, const string& hashcode)
+static string oss_object_name(int uid, const string& hashcode)
 {
-    return user_storage_dir(uid) + "/" + hashcode;
+    return "users/" + to_string(uid) + "/" + hashcode;
+}
+
+/*
+    统一打印 OSS SDK 错误。
+
+    HTTP 接口不能把 AccessKey、Bucket 内部信息等细节返回给前端；
+    但服务端日志需要保留 OSS 返回的 code/message/requestId，
+    这样排查权限、地域、Bucket 名称、网络问题时有依据。
+*/
+static void log_oss_error(const string& action, const oss::OssError& error)
+{
+    cerr << "[OSS " << action << " FAILED]"
+         << " code:" << error.Code()
+         << ", message:" << error.Message()
+         << ", requestId:" << error.RequestId()
+         << endl;
+}
+
+/*
+    把上传文件内容写入 OSS。
+
+    wfrest 已经把 multipart/form-data 中的文件内容解析到 string content。
+    OSS C++ SDK 的 PutObjectRequest 需要 shared_ptr<iostream>，
+    所以这里把 string 放进 stringstream，再交给 SDK 上传。
+*/
+static bool oss_upload_object(int uid, const string& hashcode, const string& content)
+{
+    auto client = create_oss_client();
+    string bucket_name = OssBucketName;
+    string object_name = oss_object_name(uid, hashcode);
+
+    /*
+        OSS SDK 的 PutObjectRequest 需要一个 shared_ptr<iostream> 作为上传内容。
+
+        stringstream 可以把内存中的 string 包装成“像文件一样可读写的流”：
+        - ios::in  表示后续可以从这个流读取数据
+        - ios::out 表示现在可以向这个流写入数据
+        - ios::binary 表示按二进制方式处理内容，避免文本模式影响文件字节
+
+        make_shared<stringstream>(...) 会创建 stringstream，并用 shared_ptr 管理它。
+        SDK 接口要求 shared_ptr，是因为请求对象和 SDK 内部可能都需要持有这段流数据。
+    */
+    auto stream = make_shared<stringstream>(ios::in | ios::out | ios::binary);
+    stream->write(content.data(), content.size());
+    /*
+        write() 写完后，流的“写位置”在末尾；为了让 OSS SDK 从头开始读取完整文件内容，
+        需要把“读位置”移动回开头。
+
+        seekg(0) 中的 g 表示 get pointer，也就是输入流的读取位置。
+        如果不执行 seekg(0)，SDK 可能从当前位置读取，读到的内容可能为空或不完整。
+    */
+    stream->seekg(0);
+
+    oss::PutObjectRequest request(bucket_name, object_name, stream);
+    auto outcome = client->PutObject(request);
+    if (!outcome.isSuccess()) {
+        log_oss_error("PutObject", outcome.error());
+        return false;
+    }
+    return true;
+}
+
+enum class OssDownloadStatus {
+    Ok,
+    NotFound,
+    Failed
+};
+
+/*
+    从 OSS 下载对象内容。
+
+    数据库中能查到文件记录，只代表“元数据存在”；真正的文件内容还要去 OSS 取。
+    如果 OSS 返回 NoSuchKey，说明对象存储里已经没有这个对象了，对外按“文件不存在”处理。
+    其它错误通常是权限、网络、地域、Bucket 配置等服务端问题，对外按 500 处理。
+*/
+static OssDownloadStatus oss_download_object(int uid,
+                                             const string& hashcode,
+                                             string& content)
+{
+    auto client = create_oss_client();
+    string bucket_name = OssBucketName;
+    string object_name = oss_object_name(uid, hashcode);
+
+    auto outcome = client->GetObject(bucket_name, object_name);
+    if (!outcome.isSuccess()) {
+        if (outcome.error().Code() == "NoSuchKey") {
+            return OssDownloadStatus::NotFound;
+        }
+        log_oss_error("GetObject", outcome.error());
+        return OssDownloadStatus::Failed;
+    }
+
+    auto stream = outcome.result().Content();
+    if (!stream) {
+        cerr << "[OSS GetObject FAILED] empty content stream" << endl;
+        return OssDownloadStatus::Failed;
+    }
+
+    ostringstream oss_content;
+    /*
+        outcome.result().Content() 返回的是 OSS 对象内容流。
+        rdbuf() 可以拿到这个输入流背后的缓冲区。
+
+        这行代码的含义是：把 OSS 返回流中剩余的全部字节复制到 ostringstream 中。
+        随后 oss_content.str() 就能得到完整文件内容的 string，交给 HTTP 响应返回。
+    */
+    oss_content << stream->rdbuf();
+    content = oss_content.str();
+    return OssDownloadStatus::Ok;
+}
+
+CloudDiskServer::CloudDiskServer()
+{
+    /*
+        OSS C++ SDK 要求 InitializeSdk() 在使用任何 OSS API 之前调用。
+        这个服务器对象在 main() 中只创建一次，所以把 SDK 初始化放在构造函数中，
+        可以保证整个进程生命周期内只初始化一次。
+    */
+    oss::InitializeSdk();
+}
+
+CloudDiskServer::~CloudDiskServer()
+{
+    /*
+        ShutdownSdk() 释放 SDK 内部网络、内存等全局资源。
+        main() 中会先 stop() 服务器，再让 CloudDiskServer 析构，
+        因此这里执行释放时已经不会再处理新的 OSS 请求。
+    */
+    oss::ShutdownSdk();
 }
 
 void CloudDiskServer::register_routes()
@@ -569,7 +764,7 @@ void CloudDiskServer::register_file_module()
         2. 检查 multipart/form-data
         3. 取出字段名为 file 的文件
         4. 根据文件内容生成 hashcode
-        5. 保存文件到本地 storage 目录
+        5. 上传文件内容到 OSS
         6. 写 tbl_file 记录
     */
     server_.POST("/api/v1/files", [](const HttpReq* req, HttpResp* resp) {
@@ -643,65 +838,25 @@ void CloudDiskServer::register_file_module()
 
         string hashcode = CryptoUtil::generate_hashcode(content.data(), content.size());
         /*
-            dir 是当前用户的文件存储目录。
-            例如 user.id == 3 时：
-                dir = "./storage/3"
+            第二阶段文件内容不再落到服务器本地磁盘，而是上传到 OSS。
 
-            这样不同用户的文件会放在不同目录下，目录结构更清楚。
-        */
-        string dir = user_storage_dir(user.id);
-        /*
-            real_path 是这次上传文件真正写入磁盘的位置。
+            oss_upload_object() 内部会把对象保存成：
+                users/{uid}/{hashcode}
 
-            我们没有直接用原始文件名保存文件，而是用文件内容的 hashcode 保存。
             例如：
                 user.id   = 3
                 hashcode  = "abc123..."
-                real_path = "./storage/3/abc123..."
+                object    = "users/3/abc123..."
 
-            数据库中的 filename 仍然保存原始文件名，用于列表展示和下载时的文件名。
-            数据库中的 hashcode 用来找到磁盘上的真实文件。
+            为什么不直接用原始文件名作为 ObjectName？
+            - 原始文件名可能包含特殊字符，不适合作为后端存储主键
+            - 同名文件会覆盖，hashcode 更适合作为内容对象的唯一标识
+            - 数据库已经保存 filename，下载时仍然可以恢复用户看到的原始文件名
         */
-        string real_path = storage_file_path(user.id, hashcode);
-
-        /*
-            std::error_code ec 用来接收 filesystem 操作的错误信息。
-
-            filesystem::create_directories(dir, ec) 的作用是递归创建目录：
-                dir = "./storage/3"
-
-            如果 "./storage" 不存在，它会先创建 "./storage"；
-            再创建 "./storage/3"。
-
-            为什么不用 create_directory？
-            - create_directory 只能创建一层目录
-            - create_directories 可以一次创建多层目录
-
-            为什么传 ec？
-            - 不传 ec 时，创建失败可能抛异常
-            - 传 ec 后，失败信息会写入 ec，代码可以用 if (ec) 做普通错误判断
-
-            如果目录已经存在，create_directories 不会把它当成错误。
-            这很适合上传接口：用户第二次上传文件时，用户目录大概率已经存在。
-        */
-        std::error_code ec;
-        filesystem::create_directories(dir, ec);
-        if (ec) {
+        if (!oss_upload_object(user.id, hashcode, content)) {
             response_error(resp, HttpStatusInternalServerError, "内部服务器错误");
             return;
         }
-
-        /*
-            第一阶段文件比较小，直接把 multipart 中的内容写入本地文件即可。
-            第二阶段接入 OSS 后，可以把这一步替换成上传到对象存储。
-        */
-        ofstream ofs(real_path, ios::binary);
-        if (!ofs) {
-            response_error(resp, HttpStatusInternalServerError, "内部服务器错误");
-            return;
-        }
-        ofs.write(content.data(), content.size());
-        ofs.close();
 
         string sql =
             "INSERT INTO tbl_file (uid, filename, hashcode, size) VALUES (" +
@@ -744,9 +899,9 @@ void CloudDiskServer::register_file_module()
         下载流程：
         1. 校验 token
         2. 用 fileId + uid 查询文件记录
-        3. 根据 hashcode 找到本地文件
+        3. 根据 uid + hashcode 从 OSS 下载对象内容
         4. 设置 Content-Disposition，让浏览器按原始文件名下载
-        5. resp->File() 发送文件内容
+        5. 返回 OSS 对象内容
     */
     server_.GET("/api/v1/file/{id}", [](const HttpReq* req, HttpResp* resp) {
         User user;
@@ -828,17 +983,47 @@ void CloudDiskServer::register_file_module()
 
             string filename = row[0].as_string();
             string hashcode = row[1].as_string();
-            string real_path = storage_file_path(uid, hashcode);
 
-            if (!filesystem::exists(real_path) || !filesystem::is_regular_file(real_path)) {
+            /*
+                文件内容已经从本地磁盘迁移到 OSS。
+
+                tbl_file 中的 hashcode 只负责定位对象，真正读取内容要调用：
+                    GetObject(bucket, "users/{uid}/{hashcode}")
+
+                这里把 uid 纳入 ObjectName，保证不同用户即使上传相同内容，
+                也会存储在各自的用户前缀下，不会互相影响。
+            */
+            string content; // 这里的content是传出参数, 若oss_download_object()执行成功, 其就保存了文件内容
+            OssDownloadStatus status = oss_download_object(uid, hashcode, content);
+            if (status == OssDownloadStatus::NotFound) {
                 response_error(resp, HttpStatusNotFound, "文件不存在");
+                return;
+            }
+            if (status == OssDownloadStatus::Failed) {
+                response_error(resp, HttpStatusInternalServerError, "内部服务器错误");
                 return;
             }
 
             resp->set_status(HttpStatusOK);
+            /*
+                下面两个响应头是返回给浏览器的 HTTP 响应头。
+
+                Content-Type: application/octet-stream
+                    告诉浏览器响应体是通用二进制文件，不要当 JSON 或 HTML 解析。
+
+                Content-Disposition: attachment; filename="..."
+                    告诉浏览器把响应体当附件下载，并使用数据库中保存的原始文件名。
+            */
+            resp->add_header("Content-Type", "application/octet-stream");
             resp->add_header("Content-Disposition",
                              "attachment; filename=\"" + escape_header_filename(filename) + "\"");
-            resp->File(real_path);
+            /*
+                resp->String(...) 把内存中的文件内容写入 HTTP 响应体。
+
+                move(content) 表示把 content 这块字符串内存“转交”给响应对象，
+                尽量避免再复制一份文件内容。执行后本作用域不再使用 content。
+            */
+            resp->String(move(content));
         });
     });
 }

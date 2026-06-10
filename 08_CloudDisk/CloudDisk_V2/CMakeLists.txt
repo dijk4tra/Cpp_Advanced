@@ -24,12 +24,17 @@ add_executable(server
 # PRIVATE: 传播属性，一般填PRIVATE
 target_compile_options(server PRIVATE
     -g
+    # OSS C++ SDK 默认关闭 RTTI，业务代码也按 SDK 要求使用 -fno-rtti 编译。
+    -fno-rtti
 )
 
-# -lcrypto -lssl -ljwt -lwfrest
-target_link_libraries(server PRIVATE 
+# OSS SDK 静态库依赖 curl/crypto/pthread；网盘自身还依赖 ssl/jwt/wfrest。
+target_link_libraries(server PRIVATE
+    alibabacloud-oss-cpp-sdk
+    curl
     crypto
     ssl
     jwt
     wfrest
+    pthread
 )
