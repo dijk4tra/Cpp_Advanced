@@ -1,90 +1,1429 @@
-# CloudDisk 第二期：接入阿里云 OSS
+# CloudDisk 第三期技术文档：引入 RabbitMQ 实现异步 OSS 备份
 
-本文档说明当前 `CloudDisk` 项目第二期的实现。第二期的核心变化是：用户上传的文件内容不再保存到服务器本地磁盘，而是保存到阿里云对象存储 OSS；MySQL 仍然保存用户、文件名、文件大小、文件 hash 等元数据。
+本文档说明 `CloudDisk` 第三期的后端实现。
 
-## 一、项目当前职责
+第三期的核心目标是：在第二期 OSS 存储的基础上，引入 RabbitMQ 消息队列，把“上传文件到 OSS”从 HTTP 上传请求中拆出来，改成后台异步执行。
 
-当前项目是一个基于 `wfrest` 的 Web 网盘服务，主要包含三层：
+读完本文档后，你应该能掌握：
 
-1. 前端页面
-   - 路径：`www/index.html`、`www/static/*`
-   - 负责登录、注册、文件列表、上传、下载等浏览器交互。
+1. 为什么第三期要引入 RabbitMQ。
+2. RabbitMQ 在本项目中的角色是什么。
+3. 上传接口从同步 OSS 上传改成异步备份后，完整链路如何流转。
+4. `CloudDiskServer`、`OssStorage`、`RabbitMqBackup` 三个后端模块分别负责什么。
+5. RabbitMQ 的 exchange、queue、routing key 在代码中如何声明和使用。
+6. 消息体为什么使用 JSON + Base64。
+7. 后台消费者如何拉取消息、上传 OSS、确认消息或重新入队。
+8. `build.sh` / `run.sh` 如何自动检查并启动 RabbitMQ 容器。
+9. 常见报错应该从哪里排查。
 
-2. 后端 HTTP 服务
-   - 核心文件：`CloudDiskServer.cc`、`CloudDiskServer.h`
-   - 负责注册路由、校验登录态、读写 MySQL、调用 OSS SDK。
+本文档主要讲后端。前端页面仍然沿用前两期的登录、注册、文件列表、上传、下载逻辑。
 
-3. 存储服务
-   - MySQL：保存用户信息和文件元数据。
-   - 阿里云 OSS：保存真实文件内容。
+---
 
-第一期中，文件内容保存到类似 `./storage/{uid}/{hashcode}` 的本地路径。第二期中，这部分已经替换为 OSS Object：
+## 一、第三期解决什么问题
+
+第二期中，用户上传文件时，后端流程大致是：
+
+```text
+浏览器
+  -> POST /api/v1/files
+  -> CloudDisk 后端解析 multipart/form-data
+  -> 计算文件 hash
+  -> 直接调用 OSS PutObject
+  -> 写入 MySQL 文件元数据
+  -> 返回上传成功
+```
+
+这个流程的问题是：HTTP 请求线程必须等待 OSS 上传完成。
+
+如果文件比较大，或者 OSS 网络请求比较慢，用户会明显感觉上传接口响应时间变长。更重要的是，HTTP 服务和 OSS 备份操作耦合在一起：
+
+- OSS 慢，上传接口就慢。
+- OSS 临时异常，上传接口更容易失败。
+- 上传高峰期，所有请求都直接压到 OSS 上传逻辑上。
+
+第三期引入 RabbitMQ 后，上传流程改成：
+
+```text
+浏览器
+  -> POST /api/v1/files
+  -> CloudDisk 后端解析 multipart/form-data
+  -> 计算文件 hash
+  -> 写入 MySQL 文件元数据
+  -> 发布一条 RabbitMQ 备份任务
+  -> 返回上传成功
+
+后台消费者线程
+  -> 从 RabbitMQ 队列拉取备份任务
+  -> 解码文件内容
+  -> 调用 OSS PutObject
+  -> 上传成功后 ack 消息
+```
+
+变化的关键点是：HTTP 上传接口不再直接执行 OSS PutObject，而是把“需要上传 OSS”这件事变成一条消息，交给后台线程处理。
+
+这就是消息队列最典型的用途：异步解耦。
+
+---
+
+## 二、第三期整体架构
+
+当前后端可以分成四部分：
+
+```text
+浏览器前端
+  |
+  | HTTP
+  v
+CloudDiskServer
+  |
+  | 读写用户、文件元数据
+  v
+MySQL
+
+CloudDiskServer
+  |
+  | 发布备份任务
+  v
+RabbitMQ
+  |
+  | 后台消费者线程拉取任务
+  v
+RabbitMqBackup
+  |
+  | 调用上传接口
+  v
+OssStorage
+  |
+  | PutObject / GetObject
+  v
+阿里云 OSS
+```
+
+更具体一点：
+
+```text
+POST /api/v1/files
+  |
+  | 1. 校验 JWT
+  | 2. 解析上传文件
+  | 3. 计算 hashcode
+  | 4. INSERT tbl_file
+  | 5. backup_.publish(uid, hashcode, content)
+  v
+RabbitMQ: oss.direct -> oss.queue
+  |
+  | 后台线程 RabbitMqBackup::worker_loop()
+  | 1. BasicGet 拉取消息
+  | 2. JSON 解析
+  | 3. Base64 解码文件内容
+  | 4. oss_storage_.upload_object(...)
+  | 5. BasicAck 或 BasicReject
+  v
+OSS: users/{uid}/{hashcode}
+```
+
+下载流程没有走 RabbitMQ。下载仍然是同步读取 OSS：
+
+```text
+GET /api/v1/file/{id}
+  |
+  | 1. 校验 JWT
+  | 2. 查询 tbl_file
+  | 3. oss_storage_.download_object(uid, hashcode, content)
+  | 4. 返回文件内容
+```
+
+原因很简单：下载是用户立即需要文件内容的操作，不能异步返回。上传后的备份可以稍后完成，但下载接口必须拿到内容才能响应浏览器。
+
+---
+
+## 三、当前目录结构
+
+第三期后端代码经过职责拆分后，主要文件如下：
+
+```text
+CloudDisk/
+├── CMakeLists.txt
+├── main.cc
+├── CloudDiskServer.h
+├── CloudDiskServer.cc
+├── CryptoUtil.h
+├── CryptoUtil.cc
+├── OssStorage.h
+├── OssStorage.cc
+├── RabbitMqBackup.h
+├── RabbitMqBackup.cc
+├── build.sh
+├── run.sh
+├── .env
+└── www/
+```
+
+各文件职责：
+
+```text
+main.cc
+  程序入口，创建 CloudDiskServer，注册路由，监听 8888 端口。
+
+CloudDiskServer.h / CloudDiskServer.cc
+  HTTP 服务层。
+  负责注册路由、解析请求、校验登录、读写 MySQL、调用 OssStorage / RabbitMqBackup。
+
+CryptoUtil.h / CryptoUtil.cc
+  加密工具层。
+  负责生成 salt、密码 hash、文件 hash、JWT 生成和校验。
+
+OssStorage.h / OssStorage.cc
+  OSS 存储层。
+  负责 OSS SDK 生命周期、创建 OssClient、上传对象、下载对象。
+
+RabbitMqBackup.h / RabbitMqBackup.cc
+  RabbitMQ 异步备份层。
+  负责发布备份任务、声明交换机和队列、后台线程消费消息、调用 OssStorage 上传。
+
+build.sh
+  编译项目，并自动生成 run.sh。
+
+run.sh
+  加载 .env，检查 RabbitMQ 容器，等待 RabbitMQ 服务就绪，然后启动 server。
+```
+
+这次拆分的原则是“按职责边界拆”，不是为了拆而拆。
+
+`CloudDiskServer.cc` 原来同时包含 HTTP、MySQL、OSS、RabbitMQ、线程、Base64 等逻辑，阅读成本太高。现在把 OSS 和 RabbitMQ 相关代码移出去后，`CloudDiskServer.cc` 主要保留接口流程，更适合作为学习 Web 后端业务逻辑的入口。
+
+---
+
+## 四、第三期核心对象关系
+
+`CloudDiskServer` 内部组合了三个核心对象：
+
+```cpp
+wfrest::HttpServer server_;
+OssStorage oss_storage_;
+RabbitMqBackup backup_;
+```
+
+含义如下：
+
+```text
+server_
+  负责 HTTP 监听和路由分发。
+
+oss_storage_
+  负责 OSS SDK 生命周期和 OSS 上传/下载。
+
+backup_
+  负责 RabbitMQ 生产者、消费者和后台线程。
+```
+
+构造函数：
+
+```cpp
+CloudDiskServer::CloudDiskServer()
+    : oss_storage_()
+    , backup_(oss_storage_)
+{
+    backup_.start();
+}
+```
+
+逐步理解：
+
+1. `oss_storage_()` 创建 OSS 存储对象。
+2. `OssStorage` 构造函数中调用 `oss::InitializeSdk()`。
+3. `backup_(oss_storage_)` 创建 RabbitMQ 备份对象，并把 OSS 存储对象借给它。
+4. `backup_.start()` 启动后台消费者线程。
+
+析构函数：
+
+```cpp
+CloudDiskServer::~CloudDiskServer()
+{
+    backup_.stop();
+}
+```
+
+含义是：服务器退出时，先停止 RabbitMQ 后台线程。等后台线程结束后，`OssStorage` 再析构并调用 `oss::ShutdownSdk()`。
+
+这个顺序很重要：
+
+```text
+正确顺序：
+  1. 停止 RabbitMQ 后台线程
+  2. 确认后台线程不再上传 OSS
+  3. 释放 OSS SDK
+
+错误顺序：
+  1. 先释放 OSS SDK
+  2. 后台线程还在调用 OSS PutObject
+  3. 可能产生未定义行为或崩溃
+```
+
+---
+
+## 五、上传接口完整流程
+
+上传接口在 `CloudDiskServer::register_file_module()` 中注册：
+
+```text
+POST /api/v1/files
+```
+
+它的完整流程是：
+
+```text
+1. 校验登录态
+2. 检查请求是否为 multipart/form-data
+3. 从 form 中取出字段 file
+4. 读取 filename 和 content
+5. 计算 hashcode
+6. INSERT tbl_file 写入 MySQL 元数据
+7. MySQL 写入成功后，调用 backup_.publish(...)
+8. RabbitMQ 发布成功后，返回上传成功
+```
+
+### 1. 校验登录态
+
+```cpp
+User user;
+if (!check_login(req, user)) {
+    response_error(resp, HttpStatusUnauthorized, "无效的访问令牌");
+    return;
+}
+```
+
+`check_login()` 做三件事：
+
+```text
+1. 从 Authorization 请求头中取 Bearer Token
+2. 调用 CryptoUtil::verify_token 校验 JWT
+3. 校验成功后，把 token 中的用户 id、username、createdAt 写入 user
+```
+
+后续上传文件时，`user.id` 就是当前登录用户的用户 id。
+
+### 2. 检查请求类型
+
+```cpp
+if (req->content_type() != MULTIPART_FORM_DATA) {
+    response_error(resp, HttpStatusBadRequest, "请求格式有误");
+    return;
+}
+```
+
+浏览器上传文件时，前端使用 `FormData`：
+
+```js
+const formData = new FormData();
+formData.append('file', file);
+```
+
+所以后端必须按 `multipart/form-data` 解析。普通 JSON 请求不能用来上传文件。
+
+### 3. 读取上传文件
+
+```cpp
+Form& form = req->form();
+if (!form.count("file")) {
+    response_error(resp, HttpStatusBadRequest, "请求格式有误");
+    return;
+}
+
+string filename = form["file"].first;
+string content = form["file"].second;
+```
+
+在 wfrest 中，上传字段可以理解为：
+
+```text
+form["file"].first
+  上传文件的原始文件名，例如 a.txt。
+
+form["file"].second
+  上传文件的真实内容，也就是二进制字节。
+```
+
+当前教学项目直接把文件内容放在 `std::string content` 中。`std::string` 可以保存二进制数据，不只是普通文本。
+
+### 4. 计算文件 hash
+
+```cpp
+string hashcode = CryptoUtil::generate_hashcode(content.data(), content.size());
+```
+
+`hashcode` 的作用：
+
+```text
+1. 作为 OSS ObjectName 的一部分。
+2. 下载时根据数据库中的 hashcode 定位 OSS 对象。
+3. 避免直接使用原始文件名作为后端存储对象名。
+```
+
+OSS 中最终保存路径是：
 
 ```text
 users/{uid}/{hashcode}
 ```
 
-例如用户 `uid = 3` 上传了一个 hash 为 `abc123...` 的文件，那么真实文件内容会保存为：
+例如：
 
 ```text
-OSS Bucket: ubuntu-cloud-disk-oss
-ObjectName: users/3/abc123...
+uid = 3
+hashcode = abc123...
+OSS ObjectName = users/3/abc123...
 ```
 
-数据库仍然保存原始文件名 `filename`，所以用户下载时看到的文件名不会变。
+### 5. 写入 MySQL 元数据
 
-## 二、第二期改了哪些代码
+```cpp
+INSERT INTO tbl_file (uid, filename, hashcode, size)
+VALUES (...);
+```
 
-主要改动集中在以下文件：
+MySQL 保存的是文件元数据：
 
 ```text
-CloudDiskServer.cc
-CloudDiskServer.h
-CMakeLists.txt
+uid
+  文件属于哪个用户。
+
+filename
+  用户上传时的原始文件名，用于列表展示和下载文件名。
+
+hashcode
+  文件内容 hash，用于定位 OSS 对象。
+
+size
+  文件大小。
 ```
 
-### 1. `CloudDiskServer.cc`
+注意：MySQL 不保存文件内容。真实内容最终保存到 OSS。
 
-新增了 OSS 相关逻辑：
+### 6. 发布 RabbitMQ 备份任务
 
-- OSS 配置：endpoint、region、bucket、AccessKey。
-- `getEnvOrThrow()`：从进程环境变量中读取 OSS 配置，缺少任意必需配置时直接抛异常。
-- `create_oss_client()`：创建 OSS SDK 的 `OssClient` 对象。
-- `oss_object_name()`：生成 `users/{uid}/{hashcode}` 形式的 ObjectName。
-- `oss_upload_object()`：把上传文件内容写入 OSS。
-- `oss_download_object()`：从 OSS 读取文件内容。
-- `CloudDiskServer::CloudDiskServer()`：启动时初始化 OSS SDK。
-- `CloudDiskServer::~CloudDiskServer()`：退出时释放 OSS SDK 全局资源。
-
-### 2. `CloudDiskServer.h`
-
-原来类里只有一个空的默认构造函数：
+MySQL 插入成功后，执行：
 
 ```cpp
-CloudDiskServer() { }
+backup_.publish(uid, hashcode, content)
 ```
 
-现在改成：
+这里的 `backup_` 是 `RabbitMqBackup` 对象。
+
+`publish()` 会把当前上传文件变成一条 RabbitMQ 消息。消息被成功投递到 RabbitMQ 后，HTTP 接口就可以返回上传成功。
+
+这一步是第三期最核心的变化。
+
+第二期：
+
+```text
+HTTP 请求线程 -> 直接 PutObject -> 等 OSS 返回 -> 再响应浏览器
+```
+
+第三期：
+
+```text
+HTTP 请求线程 -> 发布 RabbitMQ 消息 -> 响应浏览器
+后台线程 -> 从 RabbitMQ 拉消息 -> PutObject
+```
+
+---
+
+## 六、RabbitMQ 基础模型在项目中的对应关系
+
+RabbitMQ 的基本模型是：
+
+```text
+Producer -> Exchange -> Queue -> Consumer
+```
+
+在本项目中对应为：
+
+```text
+Producer
+  RabbitMqBackup::publish()
+
+Exchange
+  oss.direct
+
+Queue
+  oss.queue
+
+Routing Key
+  oss
+
+Consumer
+  RabbitMqBackup::worker_loop()
+```
+
+### 1. Exchange
+
+代码中声明交换机：
 
 ```cpp
-CloudDiskServer();
-~CloudDiskServer();
+channel->DeclareExchange(RabbitMqExchange,
+                         amqp::Channel::EXCHANGE_TYPE_DIRECT,
+                         false,
+                         true,
+                         false);
 ```
 
-因为第二期需要在构造函数中调用 `InitializeSdk()`，在析构函数中调用 `ShutdownSdk()`。
+含义：
 
-### 3. `CMakeLists.txt`
+```text
+RabbitMqExchange = "oss.direct"
+交换机类型 = direct
+passive = false
+durable = true
+auto_delete = false
+```
 
-OSS C++ SDK 需要额外编译和链接配置：
+逐项解释：
+
+```text
+direct
+  直接交换机。routing key 必须精确匹配，消息才会被路由到对应队列。
+
+passive = false
+  如果交换机不存在，就自动创建。
+
+durable = true
+  RabbitMQ 重启后交换机仍然存在。
+
+auto_delete = false
+  没有队列绑定时也不自动删除。
+```
+
+### 2. Queue
+
+代码中声明队列：
+
+```cpp
+channel->DeclareQueue(RabbitMqQueue,
+                      false,
+                      true,
+                      false,
+                      false);
+```
+
+含义：
+
+```text
+RabbitMqQueue = "oss.queue"
+passive = false
+durable = true
+exclusive = false
+auto_delete = false
+```
+
+逐项解释：
+
+```text
+passive = false
+  队列不存在时自动创建。
+
+durable = true
+  RabbitMQ 重启后队列仍然存在。
+
+exclusive = false
+  队列不是当前连接独占，后续可以多个消费者使用。
+
+auto_delete = false
+  连接断开后队列不会自动删除。
+```
+
+### 3. Binding
+
+代码中绑定队列和交换机：
+
+```cpp
+channel->BindQueue(RabbitMqQueue, RabbitMqExchange, RabbitMqRoutingKey);
+```
+
+含义：
+
+```text
+把 oss.queue 绑定到 oss.direct。
+绑定使用 routing key = oss。
+```
+
+之后生产者发布消息：
+
+```cpp
+channel->BasicPublish("oss.direct", "oss", message);
+```
+
+RabbitMQ 就会把消息路由到：
+
+```text
+oss.queue
+```
+
+---
+
+## 七、RabbitMQ 配置
+
+`RabbitMqBackup.cc` 中读取 RabbitMQ 配置：
+
+```cpp
+static const string RabbitMqUri =
+    getEnvOrDefault("RABBITMQ_URI", "amqp://guest:guest@localhost:5672/%2f");
+
+static const string RabbitMqExchange =
+    getEnvOrDefault("RABBITMQ_EXCHANGE", "oss.direct");
+
+static const string RabbitMqQueue =
+    getEnvOrDefault("RABBITMQ_QUEUE", "oss.queue");
+
+static const string RabbitMqRoutingKey =
+    getEnvOrDefault("RABBITMQ_ROUTING_KEY", "oss");
+```
+
+默认配置对应本地 Docker RabbitMQ：
+
+```text
+RABBITMQ_URI=amqp://guest:guest@localhost:5672/%2f
+RABBITMQ_EXCHANGE=oss.direct
+RABBITMQ_QUEUE=oss.queue
+RABBITMQ_ROUTING_KEY=oss
+```
+
+其中 `%2f` 表示 RabbitMQ 默认虚拟主机 `/`。
+
+如果你的 RabbitMQ 用户名、密码、端口不同，可以在 `.env` 中覆盖：
+
+```env
+RABBITMQ_URI=amqp://guest:guest@localhost:5672/%2f
+RABBITMQ_EXCHANGE=oss.direct
+RABBITMQ_QUEUE=oss.queue
+RABBITMQ_ROUTING_KEY=oss
+```
+
+---
+
+## 八、消息体设计：JSON + Base64
+
+第三期的 RabbitMQ 消息体是 JSON：
+
+```json
+{
+  "uid": 3,
+  "hashcode": "abc123...",
+  "contentBase64": "SGVsbG8..."
+}
+```
+
+字段含义：
+
+```text
+uid
+  当前用户 id。消费者上传 OSS 时要生成 users/{uid}/{hashcode}。
+
+hashcode
+  文件内容 hash。消费者上传 OSS 时要生成 ObjectName。
+
+contentBase64
+  文件内容的 Base64 字符串。
+```
+
+### 为什么不直接把 content 放进 JSON
+
+上传的文件内容是任意二进制数据，可能包含：
+
+```text
+'\0'
+图片字节
+压缩包字节
+非 UTF-8 字节
+```
+
+JSON 字符串要求内容是合法文本。如果直接把二进制内容放进 JSON，可能导致 JSON 格式损坏或解析失败。
+
+所以当前项目先把文件内容 Base64 编码：
+
+```cpp
+task["contentBase64"] = base64_encode(content);
+```
+
+消费者收到消息后再解码：
+
+```cpp
+base64_decode(content_base64, content)
+```
+
+### Base64 的代价
+
+Base64 会让数据变大约 1/3。
+
+生产项目通常不会把大文件内容直接放入 RabbitMQ，而是：
+
+```text
+1. 上传接口先把文件保存到临时文件系统或临时对象存储。
+2. RabbitMQ 消息只保存临时路径、uid、hashcode。
+3. 消费者根据路径读取文件，再上传 OSS。
+```
+
+当前项目是学习项目，为了不再引入临时文件目录和清理逻辑，直接把文件内容放进消息体。这样更容易理解 RabbitMQ 的生产者、队列、消费者流程。
+
+---
+
+## 九、生产者：RabbitMqBackup::publish()
+
+`publish()` 是 RabbitMQ 生产者逻辑。
+
+核心流程：
+
+```text
+1. 创建 Channel
+2. 声明 exchange / queue / binding
+3. 构造 JSON 消息体
+4. 创建 BasicMessage
+5. 设置 ContentType
+6. 设置 DeliveryMode 为持久化
+7. BasicPublish 发布消息
+```
+
+伪代码：
+
+```cpp
+bool RabbitMqBackup::publish(int uid,
+                             const string& hashcode,
+                             const string& content)
+{
+    Channel::ptr_t channel = create_rabbitmq_channel();
+    declare_rabbitmq_topology(channel);
+
+    json task;
+    task["uid"] = uid;
+    task["hashcode"] = hashcode;
+    task["contentBase64"] = base64_encode(content);
+
+    BasicMessage::ptr_t message = BasicMessage::Create(task.dump());
+    message->ContentType("application/json");
+    message->DeliveryMode(BasicMessage::dm_persistent);
+
+    channel->BasicPublish(RabbitMqExchange, RabbitMqRoutingKey, message);
+    return true;
+}
+```
+
+### 为什么每次 publish 都声明拓扑
+
+代码中每次发布消息前都会调用：
+
+```cpp
+declare_rabbitmq_topology(channel);
+```
+
+原因是简单可靠：
+
+```text
+1. 如果 exchange / queue / binding 已经存在，声明不会重复创建一份。
+2. 如果 RabbitMQ 是刚启动的，第一次 publish 可以自动把需要的结构建好。
+3. 不需要手动提前执行初始化脚本。
+```
+
+对学习项目来说，这种写法最直观。
+
+### DeliveryMode 持久化
+
+```cpp
+message->DeliveryMode(amqp::BasicMessage::dm_persistent);
+```
+
+这表示消息希望持久化。
+
+注意：消息持久化要配合 durable 队列才有意义。当前队列声明使用：
+
+```cpp
+durable = true
+```
+
+所以组合起来是：
+
+```text
+durable queue + persistent message
+```
+
+这可以提高 RabbitMQ 重启后消息保留的概率。
+
+---
+
+## 十、消费者：RabbitMqBackup::worker_loop()
+
+`worker_loop()` 是后台消费者线程执行的函数。
+
+它由：
+
+```cpp
+backup_.start();
+```
+
+启动。
+
+### 1. 后台线程生命周期
+
+`RabbitMqBackup::start()`：
+
+```cpp
+worker_ = thread(&RabbitMqBackup::worker_loop, this);
+```
+
+含义：
+
+```text
+创建一个后台线程。
+后台线程在当前 RabbitMqBackup 对象上执行 worker_loop()。
+```
+
+`RabbitMqBackup::stop()`：
+
+```cpp
+stopping_ = true;
+if (worker_.joinable()) {
+    worker_.join();
+}
+```
+
+含义：
+
+```text
+1. 设置停止标志。
+2. 等待后台线程退出。
+3. 确保程序退出时没有后台线程继续访问 OSS 或 RabbitMQ。
+```
+
+`stopping_` 使用 `std::atomic<bool>`，是因为它会被两个线程同时访问：
+
+```text
+主线程
+  设置 stopping_ = true
+
+后台线程
+  while (!stopping_) 判断是否继续运行
+```
+
+### 2. 外层循环：断线重连
+
+消费者外层是：
+
+```cpp
+while (!stopping_) {
+    try {
+        Channel::ptr_t channel = create_rabbitmq_channel();
+        declare_rabbitmq_topology(channel);
+        ...
+    } catch (const exception& ex) {
+        if (!stopping_) {
+            cerr << "[RabbitMQ consumer ERROR] " << ex.what() << endl;
+            this_thread::sleep_for(chrono::seconds(3));
+        }
+    }
+}
+```
+
+这段逻辑的作用：
+
+```text
+1. RabbitMQ 正常时，建立连接并消费消息。
+2. RabbitMQ 暂时不可用时，捕获异常。
+3. 打印错误日志。
+4. 等待 3 秒后重试连接。
+```
+
+所以即使你先启动 CloudDisk，再启动 RabbitMQ，后台线程也会不断重试，直到 RabbitMQ 可用。
+
+### 3. 内层循环：BasicGet 拉取消息
+
+当前代码使用：
+
+```cpp
+channel->BasicGet(envelope, RabbitMqQueue, false)
+```
+
+参数解释：
+
+```text
+envelope
+  输出参数。成功取到消息时，消息会放到 envelope 中。
+
+RabbitMqQueue
+  要从哪个队列取消息，这里是 oss.queue。
+
+false
+  no_ack = false，表示关闭自动确认。
+  消费者处理成功后，必须手动 BasicAck。
+```
+
+为什么不用 `BasicConsume` 推送模式？
+
+课件中展示了两种方式：
+
+```text
+方式 1：BasicGet 拉取模式
+方式 2：BasicConsume 推送模式
+```
+
+当前项目采用拉取模式，原因是：
+
+```text
+1. 代码更容易理解。
+2. 队列为空时 BasicGet 立即返回 false，不会长期阻塞。
+3. 当前 SimpleAmqpClient 的推送消费在新版本 RabbitMQ 上会触发 global_qos 兼容问题。
+4. 拉取模式避开这个问题。
+```
+
+队列为空时：
+
+```cpp
+if (!channel->BasicGet(envelope, RabbitMqQueue, false)) {
+    this_thread::sleep_for(chrono::seconds(1));
+    continue;
+}
+```
+
+含义：
+
+```text
+1. 没有消息就休眠 1 秒。
+2. 避免 while 循环空转占满 CPU。
+3. 下一秒继续尝试拉取。
+```
+
+### 4. 消息格式校验
+
+消费者取到消息后，先解析 JSON：
+
+```cpp
+json task = json::parse(body, nullptr, false);
+```
+
+这里使用 `parse(..., false)`，表示解析失败时不抛异常，而是返回 `discarded` 状态。
+
+随后检查字段：
+
+```cpp
+task.contains("uid")
+task["uid"].is_number_integer()
+task.contains("hashcode")
+task["hashcode"].is_string()
+task.contains("contentBase64")
+task["contentBase64"].is_string()
+```
+
+如果消息格式错误：
+
+```cpp
+channel->BasicReject(envelope, false);
+```
+
+第二个参数 `false` 表示不重新入队。
+
+为什么不重新入队？
+
+```text
+消息格式已经坏了。
+重新入队后，下次消费者拿到它还是坏的。
+如果一直重新入队，会形成死循环。
+```
+
+### 5. Base64 解码
+
+```cpp
+if (!base64_decode(content_base64, content)) {
+    channel->BasicReject(envelope, false);
+    continue;
+}
+```
+
+如果 Base64 解码失败，也说明消息内容损坏。当前项目直接丢弃，不重新入队。
+
+### 6. 上传 OSS
+
+```cpp
+if (oss_storage_.upload_object(uid, hashcode, content)) {
+    channel->BasicAck(envelope);
+} else {
+    channel->BasicReject(envelope, true);
+}
+```
+
+成功时：
+
+```text
+BasicAck
+  告诉 RabbitMQ：这条消息已经处理完成，可以从队列删除。
+```
+
+失败时：
+
+```text
+BasicReject(envelope, true)
+  告诉 RabbitMQ：这条消息处理失败，请重新放回队列，后续再试。
+```
+
+这里体现了消息队列的重要价值：如果 OSS 临时失败，任务不会直接丢失，而是可以重新尝试。
+
+---
+
+## 十一、OssStorage 模块
+
+`OssStorage` 只负责 OSS 存储，不关心 HTTP 和 RabbitMQ。
+
+### 1. 配置读取
+
+`OssStorage.cc` 从环境变量读取 OSS 配置：
+
+```cpp
+static const string OssEndpoint =
+    getEnvOrThrow("ALIBABA_CLOUD_OSS_ENDPOINT");
+
+static const string OssAccessKeyId =
+    getEnvOrThrow("ALIBABA_CLOUD_ACCESS_KEY_ID");
+
+static const string OssAccessKeySecret =
+    getEnvOrThrow("ALIBABA_CLOUD_ACCESS_KEY_SECRET");
+
+static const string OssBucketName =
+    getEnvOrThrow("ALIBABA_CLOUD_OSS_BUCKET");
+
+static const string OssRegion =
+    getEnvOrThrow("ALIBABA_CLOUD_OSS_REGION");
+```
+
+这些变量应该写在 `.env` 中：
+
+```env
+ALIBABA_CLOUD_ACCESS_KEY_ID=...
+ALIBABA_CLOUD_ACCESS_KEY_SECRET=...
+ALIBABA_CLOUD_OSS_BUCKET=...
+ALIBABA_CLOUD_OSS_ENDPOINT=...
+ALIBABA_CLOUD_OSS_REGION=...
+```
+
+如果缺少任意变量，程序启动时会抛出异常：
+
+```text
+Missing environment variable: xxx
+```
+
+### 2. OSS SDK 生命周期
+
+构造函数：
+
+```cpp
+OssStorage::OssStorage()
+{
+    oss::InitializeSdk();
+}
+```
+
+析构函数：
+
+```cpp
+OssStorage::~OssStorage()
+{
+    oss::ShutdownSdk();
+}
+```
+
+这是一种 RAII 思路：
+
+```text
+对象创建 -> 初始化资源
+对象销毁 -> 释放资源
+```
+
+为什么不在每次上传时初始化 SDK？
+
+```text
+1. InitializeSdk / ShutdownSdk 是全局生命周期操作。
+2. 每个请求都调用会增加不必要开销。
+3. 并发时，一个请求 ShutdownSdk 可能影响另一个请求。
+```
+
+所以当前项目只在 `OssStorage` 生命周期内初始化一次、释放一次。
+
+### 3. 创建 OssClient
+
+```cpp
+static unique_ptr<oss::OssClient> create_oss_client()
+```
+
+每次上传/下载都创建一个临时 `OssClient`。
+
+这样做的原因：
+
+```text
+1. 生命周期非常清楚。
+2. 不需要考虑全局静态对象析构顺序。
+3. 不需要确认 OssClient 是否能安全被多个线程共享。
+4. 教学项目请求量不大，按次创建可以接受。
+```
+
+### 4. ObjectName 规则
+
+```cpp
+return "users/" + to_string(uid) + "/" + hashcode;
+```
+
+例如：
+
+```text
+uid = 3
+hashcode = abc123
+ObjectName = users/3/abc123
+```
+
+优点：
+
+```text
+1. 不同用户互相隔离。
+2. 同名文件不会覆盖。
+3. ObjectName 不受原始文件名特殊字符影响。
+4. 后续可以按 users/{uid}/ 前缀清理用户文件。
+```
+
+### 5. 上传对象
+
+```cpp
+bool OssStorage::upload_object(int uid,
+                               const string& hashcode,
+                               const string& content)
+```
+
+流程：
+
+```text
+1. 创建 OssClient
+2. 生成 bucket_name
+3. 生成 object name
+4. 把 string content 包装成 stringstream
+5. 创建 PutObjectRequest
+6. client->PutObject(request)
+7. 成功返回 true，失败打印日志并返回 false
+```
+
+为什么要用 `stringstream`？
+
+OSS SDK 的 `PutObjectRequest` 需要的是流对象：
+
+```cpp
+shared_ptr<iostream>
+```
+
+而 wfrest 解析出的上传内容在内存字符串中：
+
+```cpp
+string content
+```
+
+所以用 `stringstream` 把内存中的字符串包装成一个“像文件一样可读取”的流。
+
+### 6. 下载对象
+
+```cpp
+OssDownloadStatus OssStorage::download_object(int uid,
+                                              const string& hashcode,
+                                              string& content)
+```
+
+返回值不是 bool，而是：
+
+```cpp
+enum class OssDownloadStatus {
+    Ok,
+    NotFound,
+    Failed
+};
+```
+
+原因：
+
+```text
+Ok
+  下载成功。
+
+NotFound
+  OSS 中对象不存在。HTTP 接口应该返回 404。
+
+Failed
+  OSS 服务异常、权限错误、网络错误等。HTTP 接口应该返回 500。
+```
+
+下载接口根据不同状态返回不同 HTTP 响应。
+
+---
+
+## 十二、下载接口为什么仍然同步访问 OSS
+
+下载接口：
+
+```text
+GET /api/v1/file/{id}
+```
+
+流程：
+
+```text
+1. 校验登录态
+2. 根据 fileId 和 uid 查询 tbl_file
+3. 拿到 filename 和 hashcode
+4. 调用 oss_storage_.download_object(...)
+5. 设置响应头
+6. 返回文件内容
+```
+
+下载不能异步，因为浏览器这一次请求就是为了拿到文件内容。
+
+如果下载也改成 RabbitMQ：
+
+```text
+浏览器请求下载
+  -> 后端发布下载任务
+  -> 后台线程下载
+  -> 浏览器当前请求无法立即拿到文件
+```
+
+这就不符合普通文件下载接口的语义。
+
+所以当前项目只把“上传后的备份”异步化，下载仍然同步读取 OSS。
+
+---
+
+## 十三、数据一致性说明
+
+第三期上传接口的顺序是：
+
+```text
+1. 写 MySQL 文件元数据
+2. 发布 RabbitMQ 备份任务
+3. 后台消费者上传 OSS
+```
+
+这带来一个现象：上传接口返回成功时，OSS 对象可能还没有真正上传完成。
+
+也就是说，系统变成了“最终一致性”：
+
+```text
+短时间内：
+  MySQL 已有记录
+  OSS 对象可能还在上传中
+
+最终：
+  RabbitMQ 消息被消费者处理
+  OSS 对象上传完成
+```
+
+如果用户刚上传完立刻下载，理论上可能出现：
+
+```text
+MySQL 查到文件记录
+OSS 还没有对象
+下载接口返回 404 文件不存在
+```
+
+当前项目是学习项目，没有专门做“备份中”状态字段。生产项目通常会在 `tbl_file` 增加类似字段：
+
+```text
+status = pending / ready / failed
+```
+
+然后：
+
+```text
+上传接口写 status=pending
+消费者上传 OSS 成功后更新 status=ready
+下载接口只允许下载 ready 文件
+```
+
+当前项目为了保持简单，暂不引入这个状态机。
+
+---
+
+## 十四、run.sh 如何自动启动 RabbitMQ 容器
+
+第三期依赖 RabbitMQ。如果 RabbitMQ 容器没启动，C++ 后台消费者连接 `127.0.0.1:5672` 会报：
+
+```text
+[RabbitMQ consumer ERROR] a socket error occurred
+```
+
+所以 `run.sh` 中加入了自动检查逻辑。
+
+### 1. 加载 .env
+
+```bash
+set -a
+source .env
+set +a
+```
+
+这会把 `.env` 中的配置导出为环境变量，供 C++ 程序读取。
+
+### 2. 确定容器名
+
+```bash
+RABBITMQ_CONTAINER=${RABBITMQ_CONTAINER:-rabbit}
+```
+
+含义：
+
+```text
+如果 .env 中配置了 RABBITMQ_CONTAINER，就使用配置值。
+否则默认使用 rabbit。
+```
+
+如果你的容器不叫 `rabbit`，可以在 `.env` 中写：
+
+```env
+RABBITMQ_CONTAINER=my-rabbitmq
+```
+
+### 3. 检查 Docker 命令
+
+```bash
+if ! command -v docker >/dev/null 2>&1; then
+    echo "Error: docker command not found. Please start RabbitMQ manually."
+    exit 1
+fi
+```
+
+如果系统没有 docker 命令，脚本直接报错。
+
+### 4. 检查容器是否存在
+
+```bash
+docker inspect "$RABBITMQ_CONTAINER"
+```
+
+如果容器不存在，说明你还没有创建 RabbitMQ 容器，脚本会提示：
+
+```text
+Error: RabbitMQ container 'rabbit' not found.
+Please create it first, or set RABBITMQ_CONTAINER in .env.
+```
+
+### 5. 容器存在但没运行时自动启动
+
+```bash
+RABBITMQ_RUNNING=$(docker inspect -f '{{.State.Running}}' "$RABBITMQ_CONTAINER")
+
+if [ "$RABBITMQ_RUNNING" != "true" ]; then
+    docker start "$RABBITMQ_CONTAINER" >/dev/null
+fi
+```
+
+这一步只保证容器进程启动，不代表 RabbitMQ 应用已经准备好。
+
+### 6. 等待 RabbitMQ 服务真正 ready
+
+```bash
+for i in {1..30}; do
+    if docker exec "$RABBITMQ_CONTAINER" rabbitmq-diagnostics -q check_running >/dev/null 2>&1 \
+        && docker exec "$RABBITMQ_CONTAINER" rabbitmq-diagnostics -q check_port_connectivity >/dev/null 2>&1; then
+        echo "RabbitMQ is ready."
+        break
+    fi
+    sleep 1
+done
+```
+
+这里用了两个检查：
+
+```text
+check_running
+  确认 RabbitMQ 应用已经启动。
+
+check_port_connectivity
+  确认 5672、15672 等端口已经可以连接。
+```
+
+为什么不用简单的 `docker start` 后立刻启动 server？
+
+因为 RabbitMQ 容器启动后，还需要一段时间初始化 Erlang、加载插件、恢复队列、监听 5672 端口。
+
+如果过早启动 C++ 服务，消费者可能会报 socket error。
+
+---
+
+## 十五、编译和运行
+
+### 1. 编译
+
+```bash
+cd 课件/05_Web网盘项目/CloudDisk
+./build.sh
+```
+
+`build.sh` 会执行：
+
+```text
+1. 创建 build 目录
+2. cmake ..
+3. make
+4. 回到项目根目录
+5. 重新生成 run.sh
+```
+
+注意：因为 `run.sh` 是由 `build.sh` 自动生成的，所以如果你改了 `run.sh` 的模板逻辑，应该改 `build.sh` 中的 heredoc 内容。
+
+### 2. 运行
+
+```bash
+./run.sh
+```
+
+正常输出类似：
+
+```text
+RabbitMQ container is already running: rabbit
+Waiting for RabbitMQ service to be ready...
+RabbitMQ is ready.
+[RabbitMQ consumer] polling messages from oss.queue
+```
+
+如果容器停止，输出类似：
+
+```text
+Starting RabbitMQ container: rabbit
+Waiting for RabbitMQ service to be ready...
+RabbitMQ is ready.
+[RabbitMQ consumer] polling messages from oss.queue
+```
+
+看到 `polling messages from oss.queue`，说明后台消费者已经开始轮询 RabbitMQ 队列。
+
+---
+
+## 十六、CMake 配置
+
+第三期新增了两个源文件：
 
 ```cmake
-target_compile_options(server PRIVATE
-    -g
-    -fno-rtti
-)
+OssStorage.cc
+RabbitMqBackup.cc
+```
 
+所以 `CMakeLists.txt` 中：
+
+```cmake
+add_executable(server
+    CryptoUtil.cc
+    OssStorage.cc
+    RabbitMqBackup.cc
+    CloudDiskServer.cc
+    main.cc
+)
+```
+
+第三期新增 RabbitMQ 客户端库：
+
+```cmake
 target_link_libraries(server PRIVATE
     alibabacloud-oss-cpp-sdk
+    SimpleAmqpClient
+    rabbitmq
     curl
     crypto
     ssl
@@ -94,800 +1433,297 @@ target_link_libraries(server PRIVATE
 )
 ```
 
-`-fno-rtti` 是 OSS C++ SDK 文档要求的编译选项。`alibabacloud-oss-cpp-sdk` 是 OSS SDK 本身，`curl`、`crypto`、`pthread` 是它依赖的库。
+库含义：
 
-## 三、几个容易混淆的“客户端”
+```text
+alibabacloud-oss-cpp-sdk
+  阿里云 OSS C++ SDK。
 
-这里最容易混淆的是“客户端”这个词。当前项目里至少有三种不同含义：
+SimpleAmqpClient
+  C++ RabbitMQ/AMQP 客户端封装。
 
-### 1. 浏览器客户端
+rabbitmq
+  rabbitmq-c 底层 C 客户端库。
 
-这是用户打开网页时运行的前端代码。
+curl / crypto / ssl / pthread
+  OSS SDK 和网络加密相关依赖。
+
+jwt
+  JWT 登录令牌依赖。
+
+wfrest
+  Web 后端框架。
+```
+
+---
+
+## 十七、RabbitMQ 容器要求
+
+当前脚本默认容器名是：
+
+```text
+rabbit
+```
+
+并且要求容器端口映射类似：
+
+```text
+5672  -> 5672
+15672 -> 15672
+```
+
+可以用下面命令查看：
+
+```bash
+docker ps -a
+docker inspect rabbit --format '{{json .HostConfig.PortBindings}}'
+```
+
+如果还没有创建容器，可以参考：
+
+```bash
+docker run -d \
+  --name rabbit \
+  -p 5672:5672 \
+  -p 15672:15672 \
+  rabbitmq:management
+```
+
+如果容器已经创建但停止：
+
+```bash
+docker start rabbit
+```
+
+不过正常情况下，现在直接执行：
+
+```bash
+./run.sh
+```
+
+脚本会自动启动 `rabbit` 容器。
+
+---
+
+## 十八、常见问题排查
+
+### 1. `[RabbitMQ consumer ERROR] a socket error occurred`
+
+常见原因：
+
+```text
+1. RabbitMQ 容器没有启动。
+2. RabbitMQ 5672 端口没有映射到主机。
+3. RabbitMQ 刚启动，还没有完成端口监听。
+4. RabbitMQ 用户名、密码、vhost 配置不对。
+```
+
+当前 `run.sh` 已经处理了前 3 类常见问题：
+
+```text
+1. 检查容器存在
+2. 自动 docker start
+3. 等待 check_running 和 check_port_connectivity
+```
+
+如果仍然报错，可以检查：
+
+```bash
+docker ps
+docker logs --tail 100 rabbit
+curl http://127.0.0.1:15672/
+```
+
+### 2. RabbitMQ 容器不存在
+
+报错：
+
+```text
+Error: RabbitMQ container 'rabbit' not found.
+```
+
+解决方式：
+
+```text
+1. 创建名为 rabbit 的容器。
+2. 或者在 .env 中设置 RABBITMQ_CONTAINER=实际容器名。
+```
+
+### 3. RabbitMQ 管理页面打不开
+
+检查端口映射：
+
+```bash
+docker ps
+```
+
+应该能看到：
+
+```text
+0.0.0.0:15672->15672/tcp
+```
+
+然后访问：
+
+```text
+http://127.0.0.1:15672/
+```
+
+默认账号密码通常是：
+
+```text
+guest / guest
+```
+
+### 4. `Missing environment variable`
 
 例如：
 
 ```text
-浏览器 -> POST /api/v1/files -> CloudDisk 后端
+Missing environment variable: ALIBABA_CLOUD_OSS_BUCKET
 ```
 
-它不是 C++ 里的 `OssClient`，也不是 `CloudDiskServer`。
+说明 `.env` 中缺少 OSS 配置，或者你没有通过 `./run.sh` 启动程序。
 
-### 2. `CloudDiskServer server`
-
-这是后端服务器对象，在 `main.cc` 中创建：
-
-```cpp
-CloudDiskServer server;
-server.register_routes();
-server.start(8888);
-```
-
-这个对象代表当前 Web 服务。它内部组合了一个 `wfrest::HttpServer server_`，负责监听端口、注册路由、处理 HTTP 请求。
-
-它的生命周期大致是：
-
-```text
-程序启动
-  -> 创建 CloudDiskServer server
-  -> CloudDiskServer 构造函数执行
-  -> 初始化 OSS SDK 全局资源
-  -> 注册路由
-  -> start(8888) 开始监听
-  -> 用户不断访问网页、上传、下载
-  -> Ctrl+C 停止服务
-  -> server.stop()
-  -> main() 结束
-  -> CloudDiskServer 析构函数执行
-  -> 释放 OSS SDK 全局资源
-程序退出
-```
-
-所以 `CloudDiskServer` 不是每个用户都会创建一个，也不是每次上传都会创建一个。正常情况下，整个服务进程里只有一个。
-
-### 3. OSS SDK 的 `OssClient`
-
-`OssClient` 是阿里云 OSS C++ SDK 提供的对象，用来向 OSS 发请求。
-
-当前代码中，每次上传或下载时会调用：
-
-```cpp
-auto client = create_oss_client();
-```
-
-这会创建一个 OSS SDK 的客户端对象，然后用它执行：
-
-```cpp
-client->PutObject(...); // 上传
-client->GetObject(...); // 下载
-```
-
-请求结束后，局部变量 `client` 离开作用域，`unique_ptr` 会自动销毁这个 `OssClient` 对象。
-
-这里说的“轻量客户端对象”，不是浏览器客户端，也不是 Web 服务器大对象，而是 OSS SDK 的请求操作对象。它主要保存 endpoint、AccessKey、region、连接配置等信息，然后发起一次 OSS 请求。
-
-## 四、为什么要加 `~CloudDiskServer()`
-
-阿里云 OSS C++ SDK 有两个全局生命周期函数：
-
-```cpp
-InitializeSdk();
-ShutdownSdk();
-```
-
-PDF 第 15-16 页也强调了：
-
-```text
-InitializeSdk() 和 ShutdownSdk() 应该在整个程序生命周期中各只执行一次。
-```
-
-所以不能在每次上传、每次下载时这样写：
-
-```cpp
-InitializeSdk();
-PutObject(...);
-ShutdownSdk();
-```
-
-这样做的问题是：
-
-- 每个请求都初始化/释放 SDK，成本不必要。
-- 多个用户并发上传下载时，某个请求可能把 SDK 释放掉，影响另一个请求。
-- SDK 全局资源生命周期会变得混乱。
-
-现在的写法是：
-
-```cpp
-CloudDiskServer::CloudDiskServer()
-{
-    oss::InitializeSdk();
-}
-
-CloudDiskServer::~CloudDiskServer()
-{
-    oss::ShutdownSdk();
-}
-```
-
-含义是：
-
-- `CloudDiskServer` 创建时，初始化 OSS SDK。
-- `CloudDiskServer` 销毁时，释放 OSS SDK。
-- 因为 `main.cc` 中 `CloudDiskServer server;` 只创建一次，所以 SDK 也只初始化一次、释放一次。
-
-这是一种典型的 RAII 写法：对象创建时申请资源，对象销毁时释放资源。
-
-## 五、为什么上传/下载时还要创建 `OssClient`
-
-需要区分两类资源：
-
-1. OSS SDK 全局资源
-   - 由 `InitializeSdk()` 创建。
-   - 由 `ShutdownSdk()` 释放。
-   - 整个程序生命周期只做一次。
-
-2. OSS 请求客户端对象 `OssClient`
-   - 由 `create_oss_client()` 创建。
-   - 上传或下载时临时使用。
-   - 请求结束后自动销毁。
-
-也就是说，启动服务器时不会创建一个“很大的 OSS 客户端对象”来一直服务所有请求。启动时只是初始化 OSS SDK 的全局环境。真正执行上传/下载时，才创建一个 `OssClient` 对象去发请求。
-
-当前这样设计的原因是：
-
-- 代码简单，容易理解。
-- 不需要处理全局静态对象的析构顺序问题。
-- 不需要担心 `OssClient` 是否可以被多个线程安全共享。
-- 当前教学项目请求量较小，每次创建一个 `OssClient` 的成本可以接受。
-
-如果是高并发生产项目，可以进一步优化成：
-
-```text
-CloudDiskServer 内部持有一个 OssClient 成员
-或
-封装一个 OssStorage 类统一管理 OssClient
-```
-
-但那样需要更仔细地确认 SDK 客户端的线程安全、生命周期、错误恢复策略。当前阶段先选择更直观、更稳妥的写法。
-
-## 六、为什么不做成全局静态 `OssClient`
-
-例如不要写成这样：
-
-```cpp
-static oss::OssClient client(...);
-```
-
-原因是全局静态对象的初始化和析构顺序不容易控制。
-
-`OssClient` 必须在 `InitializeSdk()` 之后使用，并且最好在 `ShutdownSdk()` 之前析构。如果写成全局静态对象，可能出现：
-
-```text
-程序退出
-  -> ShutdownSdk() 先执行
-  -> 全局静态 OssClient 后析构
-```
-
-这样 `OssClient` 析构时 SDK 全局资源已经释放了，存在隐藏风险。
-
-当前代码避免了这个问题：
-
-```cpp
-static unique_ptr<oss::OssClient> create_oss_client()
-{
-    ...
-    return make_unique<oss::OssClient>(...);
-}
-```
-
-`OssClient` 是函数里的局部对象，请求结束就销毁；而 OSS SDK 全局资源在整个服务器退出时才释放。
-
-## 七、上传流程
-
-接口：
-
-```text
-POST /api/v1/files
-```
-
-当前上传流程：
-
-```text
-1. 校验 Authorization: Bearer token
-2. 检查 Content-Type 是否为 multipart/form-data
-3. 从表单字段 file 中取出 filename 和 content
-4. 使用文件内容生成 hashcode
-5. 调用 oss_upload_object(uid, hashcode, content)
-6. OSS 保存对象 users/{uid}/{hashcode}
-7. MySQL 写入 tbl_file 元数据
-8. 返回上传成功 JSON
-```
-
-关键点：
-
-- `filename` 是用户看到的原始文件名。
-- `content` 是文件真实内容。
-- `hashcode` 是根据文件内容算出来的后端存储名。
-- OSS ObjectName 不使用原始文件名，而使用 `users/{uid}/{hashcode}`。
-
-这样做的好处：
-
-- 不同用户的文件按 `uid` 隔离。
-- 文件名中即使有空格、中文或特殊字符，也不会影响 OSS 对象定位。
-- 下载时仍然可以用数据库里的 `filename` 还原原始文件名。
-
-## 八、下载流程
-
-接口：
-
-```text
-GET /api/v1/file/{id}
-```
-
-当前下载流程：
-
-```text
-1. 校验 Authorization: Bearer token
-2. 根据 fileId 和当前 uid 查询 tbl_file
-3. 如果查不到，返回 404 文件不存在
-4. 查到 filename 和 hashcode
-5. 调用 oss_download_object(uid, hashcode, content)
-6. OSS 读取对象 users/{uid}/{hashcode}
-7. 设置 Content-Disposition，让浏览器按原始文件名下载
-8. 返回文件内容
-```
-
-SQL 查询中带了当前登录用户的 `uid`：
-
-```sql
-WHERE id = file_id AND uid = 当前登录用户id
-```
-
-这可以防止用户通过猜测别人的 `fileId` 下载不属于自己的文件。
-
-## 九、MySQL 和 OSS 分别保存什么
-
-MySQL 保存的是元数据：
-
-```text
-tbl_user:
-  id
-  username
-  password
-  salt
-  created_at
-  tomb
-
-tbl_file:
-  id
-  uid
-  filename
-  hashcode
-  size
-  created_at
-  last_update
-```
-
-OSS 保存的是文件内容：
-
-```text
-users/{uid}/{hashcode} -> 文件二进制内容
-```
-
-所以下载时必须两步都成功：
-
-1. MySQL 查到这条文件记录。
-2. OSS 查到对应 Object。
-
-如果 MySQL 有记录但 OSS 没有对象，当前接口会返回：
-
-```text
-404 文件不存在
-```
-
-## 十、当前实现的一个细节：先上传 OSS，再写 MySQL
-
-当前上传顺序是：
-
-```text
-1. PutObject 上传 OSS
-2. INSERT tbl_file 写 MySQL
-```
-
-这样做的原因是：只有文件内容真正上传成功了，才写数据库记录。
-
-但这也有一个边界情况：
-
-```text
-OSS 上传成功
-MySQL 写入失败
-```
-
-这时 OSS 中会留下一个没有数据库记录的对象，也就是“孤儿对象”。当前教学项目先不处理这个问题。生产项目通常会补一层补偿逻辑：
-
-```text
-如果 MySQL INSERT 失败，则 DeleteObject 删除刚上传的 OSS 对象
-```
-
-或者通过定时任务清理数据库中不存在的 OSS 对象。
-
-## 十一、配置方式
-
-当前版本已经不再把 OSS AccessKey、Bucket、Endpoint 等敏感配置写死在代码里，而是通过 `.env` 文件集中配置。
-
-`.env` 文件位于项目根目录：
-
-```text
-课件/05_Web网盘项目/CloudDisk/.env
-```
-
-内容格式如下：
-
-```text
-ALIBABA_CLOUD_ACCESS_KEY_ID=你的 AccessKey ID
-ALIBABA_CLOUD_ACCESS_KEY_SECRET=你的 AccessKey Secret
-ALIBABA_CLOUD_OSS_BUCKET=ubuntu-cloud-disk-oss
-ALIBABA_CLOUD_OSS_ENDPOINT=oss-cn-wuhan-lr.aliyuncs.com
-ALIBABA_CLOUD_OSS_REGION=cn-wuhan
-```
-
-`CloudDiskServer.cc` 中通过 `getEnvOrThrow()` 读取这些配置：
-
-```cpp
-static const string OssEndpoint = getEnvOrThrow("ALIBABA_CLOUD_OSS_ENDPOINT");
-static const string OssAccessKeyId = getEnvOrThrow("ALIBABA_CLOUD_ACCESS_KEY_ID");
-static const string OssAccessKeySecret = getEnvOrThrow("ALIBABA_CLOUD_ACCESS_KEY_SECRET");
-static const string OssBucketName = getEnvOrThrow("ALIBABA_CLOUD_OSS_BUCKET");
-static const string OssRegion = getEnvOrThrow("ALIBABA_CLOUD_OSS_REGION");
-```
-
-注意一个关键细节：`getEnvOrThrow()` 内部调用的是 `getenv()`，它读取的是当前 `server` 进程的环境变量；C++ 程序本身不会自动读取 `.env` 文件。
-
-本项目通过 `run.sh` 解决这个问题。`run.sh` 会先执行：
-
-```bash
-set -a
-source .env
-set +a
-```
-
-这三行的含义是：把 `.env` 中的变量加载并导出为环境变量，然后再启动 `./server`。因此推荐使用：
+正确方式：
 
 ```bash
 ./run.sh
 ```
 
-而不是直接执行：
+不要直接：
 
 ```bash
 ./server
 ```
 
-如果直接运行 `./server`，并且当前 shell 没有提前加载 `.env`，`getEnvOrThrow()` 会因为找不到配置而抛出类似这样的异常：
+因为直接执行 `./server` 不会自动加载 `.env`。
+
+### 5. 上传成功后立刻下载返回文件不存在
+
+第三期上传是异步备份。
+
+上传接口返回成功时：
 
 ```text
-Missing environment variable: ALIBABA_CLOUD_ACCESS_KEY_ID
+MySQL 元数据已经写入
+RabbitMQ 任务已经发布
+OSS 可能还在后台上传
 ```
 
-AccessKey 属于敏感信息，不适合长期写在源码中。当前 `.env` 方案比写死在 `.cc` 文件中更合理；后续如果提交到远程仓库，应考虑把 `.env` 加入 `.gitignore`，只提交 `.env.example` 模板。
+如果立刻下载，有可能 OSS 对象还没生成。
 
-## 十二、编译和运行
+当前学习项目没有加文件状态字段，所以这是最终一致性带来的正常现象。
 
-编译：
+---
 
-```bash
-cd 课件/05_Web网盘项目/CloudDisk
-cmake --build build
-```
+## 十九、为什么当前项目不继续过度拆分
 
-如果重新生成构建目录：
-
-```bash
-cd 课件/05_Web网盘项目/CloudDisk
-rm -rf build
-mkdir build
-cd build
-cmake ..
-make
-```
-
-运行：
-
-```bash
-cd 课件/05_Web网盘项目/CloudDisk
-./run.sh
-```
-
-服务默认监听：
+当前拆分为：
 
 ```text
-http://localhost:8888
+CloudDiskServer
+OssStorage
+RabbitMqBackup
+CryptoUtil
 ```
 
-## 十三、常见问题
+这是比较适合教学项目的粒度。
 
-### 1. 为什么下载时不再用 `resp->File(real_path)`
-
-第一期文件在服务器本地磁盘上，所以可以直接：
-
-```cpp
-resp->File(real_path);
-```
-
-第二期文件在 OSS 上，服务器本地没有这个文件路径，所以要先：
-
-```cpp
-GetObject(...)
-```
-
-把 OSS 对象内容读回来，再：
-
-```cpp
-resp->String(move(content));
-```
-
-返回给浏览器。
-
-### 2. OSS 的 `users/3/xxx` 是真实目录吗
-
-不是。OSS 是对象存储，不是传统文件系统。
-
-`users/3/xxx` 只是一个 ObjectName 字符串。OSS 控制台里看起来像目录，是因为控制台把 `/` 当作分隔符展示了。
-
-### 3. 为什么数据库还要保存 `filename`
-
-因为 `hashcode` 是后端存储用的名字，不适合展示给用户。
-
-用户上传的是：
+没有继续拆成：
 
 ```text
-毕业设计.docx
+ConfigManager
+ResponseUtil
+SqlBuilder
+AuthMiddleware
+FileRepository
+MessageCodec
 ```
 
-OSS 存的是：
+原因：
 
 ```text
-users/3/a948904f2f0f479...
+1. 项目规模还不大。
+2. 太多类会增加学习成本。
+3. 当前最复杂的职责就是 OSS 和 RabbitMQ，把它们拆出去已经能明显降低 CloudDiskServer.cc 的负担。
+4. 保持接口流程集中在 CloudDiskServer.cc 中，更方便初学者按 HTTP 路由阅读业务。
 ```
 
-下载时需要用数据库里的 `filename` 设置响应头：
+如果后续进入第四期微服务架构，再继续拆分会更自然。
 
-```http
-Content-Disposition: attachment; filename="毕业设计.docx"
-```
+---
 
-浏览器才会按用户原始文件名下载。
+## 二十、第三期你应该重点掌握什么
 
-### 4. 当前代码是不是每次请求都会连接 OSS
-
-上传和下载请求会创建一个 `OssClient` 对象，然后发起一次 OSS 请求。
-
-但这不等于每次都初始化 SDK。SDK 初始化只在 `CloudDiskServer` 构造函数里做一次。
-
-可以理解为：
+学习第三期时，建议按下面顺序读代码：
 
 ```text
-InitializeSdk(): 打开 OSS SDK 的全局环境，只做一次
-OssClient: 本次 OSS 操作使用的请求对象，上传/下载时临时创建
-PutObject/GetObject: 真正访问 OSS 的网络请求
-ShutdownSdk(): 关闭 OSS SDK 的全局环境，只做一次
+1. main.cc
+   看服务器如何创建、注册路由、启动。
+
+2. CloudDiskServer.h
+   看 CloudDiskServer 组合了哪些模块。
+
+3. CloudDiskServer.cc
+   重点看 POST /api/v1/files 和 GET /api/v1/file/{id}。
+
+4. RabbitMqBackup.h / RabbitMqBackup.cc
+   看 RabbitMQ 如何发布消息、如何后台拉取消息。
+
+5. OssStorage.h / OssStorage.cc
+   看 OSS SDK 生命周期、上传和下载。
+
+6. build.sh / run.sh
+   看运行前如何确保 RabbitMQ 容器可用。
 ```
 
-### 5. 如果以后要做删除文件怎么办
-
-删除接口应该同时处理两件事：
+第三期最重要的思想不是某一行 API，而是这个架构变化：
 
 ```text
-1. 删除 MySQL 中的 tbl_file 记录，或设置 tomb
-2. 删除 OSS 中的 users/{uid}/{hashcode}
+同步调用：
+  HTTP 请求线程直接做耗时操作。
+
+异步解耦：
+  HTTP 请求线程只发布任务，后台消费者慢慢处理任务。
 ```
 
-如果多个数据库记录可能指向同一个 OSS 对象，还需要先确认是否还有其它记录引用该对象，再决定能不能删除 OSS 对象。
-
-当前第二期只改造了上传和下载，未新增删除接口。
-
-## 十四、代码细节问答
-
-### 1. `.env`、`getEnvOrThrow()` 和 `getenv()` 是什么关系
-
-当前代码中读取 OSS 配置的是 `getEnvOrThrow()`：
-
-```cpp
-static string getEnvOrThrow(const char* name) {
-    const char* value = getenv(name);
-    if (value == nullptr || string(value).empty()) {
-        throw runtime_error(string("Missing environment variable: ") + name);
-    }
-    return string(value);
-}
-```
-
-它的职责有两个：
-
-- 调用 `getenv(name)` 读取当前进程环境变量。
-- 如果变量不存在或为空，直接抛出异常，让程序启动失败。
-
-这里容易误解：`getenv()` 不是读取 `.env` 文件，它只读取“已经进入当前进程环境”的变量。
-
-`.env` 文件只是一个普通文本文件：
+RabbitMQ 在这里的价值是：
 
 ```text
-ALIBABA_CLOUD_ACCESS_KEY_ID=...
-ALIBABA_CLOUD_ACCESS_KEY_SECRET=...
-ALIBABA_CLOUD_OSS_BUCKET=ubuntu-cloud-disk-oss
-ALIBABA_CLOUD_OSS_ENDPOINT=oss-cn-wuhan-lr.aliyuncs.com
-ALIBABA_CLOUD_OSS_REGION=cn-wuhan
+1. 把上传接口和 OSS 备份解耦。
+2. 让 HTTP 响应不再等待 OSS PutObject。
+3. 在 OSS 临时失败时，可以通过消息重新入队重试。
+4. 为后续微服务拆分打基础。
 ```
 
-要让 `getenv()` 读到 `.env` 中的变量，需要先把 `.env` 加载到 shell 环境里。本项目的 `run.sh` 已经做了这一步：
+---
 
-```bash
-set -a
-source .env
-set +a
-./server
-```
+## 二十一、当前第三期的局限
 
-所以正确启动方式是：
+为了保持学习项目简单，当前实现没有处理所有生产级边界。
 
-```bash
-./run.sh
-```
-
-如果你手动启动，也可以这样：
-
-```bash
-set -a
-source .env
-set +a
-./server
-```
-
-如果只是直接执行 `./server`，而当前 shell 没有这些环境变量，程序会在读取 OSS 配置时抛异常并退出。
-
-### 2. `static unique_ptr<oss::OssClient>` 是什么意思
-
-代码是：
-
-```cpp
-static unique_ptr<oss::OssClient> create_oss_client()
-```
-
-这里要拆开看：
+主要局限：
 
 ```text
-static
-unique_ptr<oss::OssClient>
-create_oss_client()
+1. 文件内容直接放入 RabbitMQ 消息体，不适合大文件。
+2. tbl_file 没有 status 字段，无法区分 pending / ready / failed。
+3. OSS 上传失败后会重新入队，但没有最大重试次数。
+4. 没有死信队列。
+5. 没有后台任务监控页面。
+6. 没有对 RabbitMQ 消息体做版本号设计。
 ```
 
-`static` 修饰的是函数，意思是这个函数只在当前 `CloudDiskServer.cc` 文件内部可见，别的 `.cc` 文件不能直接调用它。
+这些不是当前阶段的重点。
 
-`unique_ptr<oss::OssClient>` 才是返回值类型，表示函数返回一个由智能指针管理的 `OssClient` 对象。
-
-所以这不是“返回一个 static 的 unique_ptr”，也不是“全局只创建一个 OssClient”。每次调用 `create_oss_client()` 都会创建一个新的 `OssClient`。
-
-### 3. 能不能直接返回 `oss::OssClient`
-
-理论上可以写成类似：
-
-```cpp
-static oss::OssClient create_oss_client()
-{
-    oss::ClientConfiguration conf;
-    oss::OssClient client(endpoint, accessKeyId, accessKeySecret, conf);
-    client.SetRegion(region);
-    return client;
-}
-```
-
-但当前项目没有这样写，主要是为了避免几个问题：
-
-- 返回对象本身可能涉及拷贝或移动。
-- `OssClient` 是 SDK 类型，内部持有实现对象和连接配置，直接值返回不如指针所有权清晰。
-- `unique_ptr` 明确表达“这个客户端对象只属于当前调用者，用完自动销毁”。
-
-PDF 示例：
-
-```cpp
-OssClient client(endpoint, accessKeyId, accessKeySecret, conf);
-```
-
-是在 `main()` 函数中直接创建局部变量，然后马上使用。这种写法完全没问题。
-
-当前项目多封装了一层函数：
-
-```cpp
-auto client = create_oss_client();
-```
-
-因为上传和下载都需要创建客户端，封装成函数可以避免重复写 endpoint、AccessKey、region 这些配置代码。
-
-### 4. 为什么用 `make_unique<oss::OssClient>`
-
-代码：
-
-```cpp
-auto client = make_unique<oss::OssClient>(
-    endpoint,
-    accessKeyId,
-    accessKeySecret,
-    conf);
-```
-
-可以理解为安全版的：
-
-```cpp
-oss::OssClient* client = new oss::OssClient(endpoint, accessKeyId, accessKeySecret, conf);
-```
-
-区别是 `make_unique` 返回的是 `unique_ptr`，不需要手动 `delete`。
-
-当 `client` 离开作用域时：
-
-```cpp
-auto client = create_oss_client();
-...
-// 函数结束
-```
-
-`unique_ptr` 会自动释放它管理的 `OssClient`。
-
-所以：
-
-```cpp
-make_unique<T>(参数...)
-```
-
-含义就是：
+如果要继续增强，可以考虑：
 
 ```text
-创建一个 T 对象，并把它交给 unique_ptr 管理。
+1. 增加 tbl_file.status。
+2. 消费者上传成功后更新 status=ready。
+3. 消费失败多次后进入 failed 状态。
+4. RabbitMQ 增加死信交换机和死信队列。
+5. 大文件改成临时文件路径或临时 OSS 对象名传递。
 ```
 
-### 5. `make_shared<stringstream>(ios::in | ios::out | ios::binary)` 在做什么
-
-OSS SDK 上传内存内容时，接口需要的是：
-
-```cpp
-shared_ptr<iostream>
-```
-
-但当前上传接口拿到的是：
-
-```cpp
-string content;
-```
-
-也就是文件内容已经在内存字符串里。
-
-所以代码创建了一个 `stringstream`：
-
-```cpp
-auto stream = make_shared<stringstream>(ios::in | ios::out | ios::binary);
-```
-
-`stringstream` 可以把内存当成“流”使用，类似一个内存文件：
-
-- `ios::out`：允许向流里写入内容。
-- `ios::in`：允许后续从流里读取内容。
-- `ios::binary`：按二进制方式处理内容。
-
-然后把文件内容写进去：
-
-```cpp
-stream->write(content.data(), content.size());
-```
-
-最后把这个流交给 OSS：
-
-```cpp
-oss::PutObjectRequest request(bucket_name, object_name, stream);
-```
-
-### 6. `stream->seekg(0)` 是什么意义
-
-`stringstream` 内部有两个位置：
-
-```text
-写位置 put pointer
-读位置 get pointer
-```
-
-执行：
-
-```cpp
-stream->write(content.data(), content.size());
-```
-
-之后，写位置已经到了末尾。为了让 OSS SDK 从头读取这个流，需要把读位置移动到开头：
-
-```cpp
-stream->seekg(0);
-```
-
-`seekg` 的 `g` 是 get，表示设置读取位置。
-
-如果不调用 `seekg(0)`，SDK 读取这个流时可能从错误位置开始，导致上传内容为空或不完整。
-
-### 7. `oss_content << stream->rdbuf()` 在做什么
-
-下载时 OSS SDK 返回的是一个内容流：
-
-```cpp
-auto stream = outcome.result().Content();
-```
-
-这个 `stream` 可以理解为“从 OSS 下载回来的文件流”。
-
-代码：
-
-```cpp
-ostringstream oss_content;
-oss_content << stream->rdbuf();
-content = oss_content.str();
-```
-
-含义是：
-
-```text
-把 OSS 返回流中的所有内容，复制到 oss_content 这个内存输出流中，
-然后用 oss_content.str() 得到完整字符串。
-```
-
-`rdbuf()` 返回的是流背后的缓冲区。把一个流的缓冲区插入到另一个流中，是 C++ 中常见的“整流复制”写法。
-
-### 8. 970-972 行的 header 是 OSS 要求的吗
-
-不是。
-
-这两个 header 是后端返回给浏览器的 HTTP 响应头，和 OSS 没有直接关系：
-
-```cpp
-resp->add_header("Content-Type", "application/octet-stream");
-resp->add_header("Content-Disposition",
-                 "attachment; filename=\"...\"");
-```
-
-`Content-Type: application/octet-stream` 表示响应体是普通二进制文件。
-
-`Content-Disposition: attachment; filename="..."` 表示浏览器应该把响应体当附件下载，并使用指定文件名。
-
-它们的作用对象是浏览器：
-
-```text
-CloudDisk 后端 -> 浏览器
-```
-
-不是：
-
-```text
-CloudDisk 后端 -> OSS
-```
-
-### 9. `resp->String(move(content))` 在做什么
-
-`resp->String(...)` 是 wfrest 提供的接口，用来设置 HTTP 响应体。
-
-第一期本地文件下载时可以这样：
-
-```cpp
-resp->File(real_path);
-```
-
-因为文件就在服务器磁盘上。
-
-第二期中，文件内容来自 OSS，已经被读到了内存字符串：
-
-```cpp
-string content;
-```
-
-所以要把这个字符串作为响应体返回：
-
-```cpp
-resp->String(move(content));
-```
-
-`move(content)` 的作用是把 `content` 内部管理的那块内存尽量转移给响应对象，避免再复制一份文件内容。
-
-执行后不要再使用 `content`，因为它已经被移动了。当前代码中 `resp->String(move(content));` 后面没有再访问 `content`，所以是正确的。
+当前第三期已经完整展示了消息队列引入后的核心后端流程。
