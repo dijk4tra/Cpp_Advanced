@@ -96,7 +96,7 @@ OssStorage::~OssStorage()
 {
     /*
         ShutdownSdk() 释放 OSS SDK 内部的全局资源。
-        RabbitMqBackup 停止后台线程后，OssStorage 才会析构，因此不会一边释放 SDK 一边上传文件。
+        RabbitMqOssUploader 停止后台线程后，OssStorage 才会析构，因此不会一边释放 SDK 一边上传文件。
     */
     oss::ShutdownSdk();
 }

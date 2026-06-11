@@ -1,4 +1,4 @@
-# CloudDisk 第三期技术文档：引入 RabbitMQ 实现异步 OSS 备份
+# CloudDisk 第三期技术文档：引入 RabbitMQ 实现异步 OSS 上传
 
 本文档说明 `CloudDisk` 第三期的后端实现。
 
@@ -8,8 +8,8 @@
 
 1. 为什么第三期要引入 RabbitMQ。
 2. RabbitMQ 在本项目中的角色是什么。
-3. 上传接口从同步 OSS 上传改成异步备份后，完整链路如何流转。
-4. `CloudDiskServer`、`OssStorage`、`RabbitMqBackup` 三个后端模块分别负责什么。
+3. 上传接口从同步 OSS 上传改成异步 OSS 上传后，完整链路如何流转。
+4. `CloudDiskServer`、`OssStorage`、`RabbitMqOssUploader` 三个后端模块分别负责什么。
 5. RabbitMQ 的 exchange、queue、routing key 在代码中如何声明和使用。
 6. 消息体为什么使用 JSON + Base64。
 7. 后台消费者如何拉取消息、上传 OSS、确认消息或重新入队。
@@ -36,7 +36,7 @@
 
 这个流程的问题是：HTTP 请求线程必须等待 OSS 上传完成。
 
-如果文件比较大，或者 OSS 网络请求比较慢，用户会明显感觉上传接口响应时间变长。更重要的是，HTTP 服务和 OSS 备份操作耦合在一起：
+如果文件比较大，或者 OSS 网络请求比较慢，用户会明显感觉上传接口响应时间变长。更重要的是，HTTP 服务和 OSS 上传操作耦合在一起：
 
 - OSS 慢，上传接口就慢。
 - OSS 临时异常，上传接口更容易失败。
@@ -50,11 +50,11 @@
   -> CloudDisk 后端解析 multipart/form-data
   -> 计算文件 hash
   -> 写入 MySQL 文件元数据
-  -> 发布一条 RabbitMQ 备份任务
+  -> 发布一条 RabbitMQ 上传任务
   -> 返回上传成功
 
 后台消费者线程
-  -> 从 RabbitMQ 队列拉取备份任务
+  -> 从 RabbitMQ 队列拉取上传任务
   -> 解码文件内容
   -> 调用 OSS PutObject
   -> 上传成功后 ack 消息
@@ -83,13 +83,13 @@ MySQL
 
 CloudDiskServer
   |
-  | 发布备份任务
+  | 发布上传任务
   v
 RabbitMQ
   |
   | 后台消费者线程拉取任务
   v
-RabbitMqBackup
+RabbitMqOssUploader
   |
   | 调用上传接口
   v
@@ -109,11 +109,11 @@ POST /api/v1/files
   | 2. 解析上传文件
   | 3. 计算 hashcode
   | 4. INSERT tbl_file
-  | 5. backup_.publish(uid, hashcode, content)
+  | 5. oss_uploader_.publish(uid, hashcode, content)
   v
 RabbitMQ: oss.direct -> oss.queue
   |
-  | 后台线程 RabbitMqBackup::worker_loop()
+  | 后台线程 RabbitMqOssUploader::worker_loop()
   | 1. BasicGet 拉取消息
   | 2. JSON 解析
   | 3. Base64 解码文件内容
@@ -134,7 +134,7 @@ GET /api/v1/file/{id}
   | 4. 返回文件内容
 ```
 
-原因很简单：下载是用户立即需要文件内容的操作，不能异步返回。上传后的备份可以稍后完成，但下载接口必须拿到内容才能响应浏览器。
+原因很简单：下载是用户立即需要文件内容的操作，不能异步返回。上传后的 OSS 写入可以稍后完成，但下载接口必须拿到内容才能响应浏览器。
 
 ---
 
@@ -152,8 +152,8 @@ CloudDisk/
 ├── CryptoUtil.cc
 ├── OssStorage.h
 ├── OssStorage.cc
-├── RabbitMqBackup.h
-├── RabbitMqBackup.cc
+├── RabbitMqOssUploader.h
+├── RabbitMqOssUploader.cc
 ├── build.sh
 ├── run.sh
 ├── .env
@@ -168,7 +168,7 @@ main.cc
 
 CloudDiskServer.h / CloudDiskServer.cc
   HTTP 服务层。
-  负责注册路由、解析请求、校验登录、读写 MySQL、调用 OssStorage / RabbitMqBackup。
+  负责注册路由、解析请求、校验登录、读写 MySQL、调用 OssStorage / RabbitMqOssUploader。
 
 CryptoUtil.h / CryptoUtil.cc
   加密工具层。
@@ -178,9 +178,9 @@ OssStorage.h / OssStorage.cc
   OSS 存储层。
   负责 OSS SDK 生命周期、创建 OssClient、上传对象、下载对象。
 
-RabbitMqBackup.h / RabbitMqBackup.cc
-  RabbitMQ 异步备份层。
-  负责发布备份任务、声明交换机和队列、后台线程消费消息、调用 OssStorage 上传。
+RabbitMqOssUploader.h / RabbitMqOssUploader.cc
+  RabbitMQ 异步 OSS 上传层。
+  负责发布上传任务、声明交换机和队列、后台线程消费消息、调用 OssStorage 上传。
 
 build.sh
   编译项目，并自动生成 run.sh。
@@ -202,7 +202,7 @@ run.sh
 ```cpp
 wfrest::HttpServer server_;
 OssStorage oss_storage_;
-RabbitMqBackup backup_;
+RabbitMqOssUploader oss_uploader_;
 ```
 
 含义如下：
@@ -214,7 +214,7 @@ server_
 oss_storage_
   负责 OSS SDK 生命周期和 OSS 上传/下载。
 
-backup_
+oss_uploader_
   负责 RabbitMQ 生产者、消费者和后台线程。
 ```
 
@@ -223,9 +223,9 @@ backup_
 ```cpp
 CloudDiskServer::CloudDiskServer()
     : oss_storage_()
-    , backup_(oss_storage_)
+    , oss_uploader_(oss_storage_)
 {
-    backup_.start();
+    oss_uploader_.start();
 }
 ```
 
@@ -233,15 +233,15 @@ CloudDiskServer::CloudDiskServer()
 
 1. `oss_storage_()` 创建 OSS 存储对象。
 2. `OssStorage` 构造函数中调用 `oss::InitializeSdk()`。
-3. `backup_(oss_storage_)` 创建 RabbitMQ 备份对象，并把 OSS 存储对象借给它。
-4. `backup_.start()` 启动后台消费者线程。
+3. `oss_uploader_(oss_storage_)` 创建 RabbitMQ OSS 上传对象，并把 OSS 存储对象借给它。
+4. `oss_uploader_.start()` 启动后台消费者线程。
 
 析构函数：
 
 ```cpp
 CloudDiskServer::~CloudDiskServer()
 {
-    backup_.stop();
+    oss_uploader_.stop();
 }
 ```
 
@@ -260,6 +260,91 @@ CloudDiskServer::~CloudDiskServer()
   2. 后台线程还在调用 OSS PutObject
   3. 可能产生未定义行为或崩溃
 ```
+
+### 路由回调为什么要捕获 this
+
+`CloudDiskServer.cc` 中有几处 lambda 写了 `[this]` 或者在捕获列表中包含 `this`。
+
+这里的 `this` 是当前 `CloudDiskServer` 对象的指针。捕获 `this` 后，lambda 内部才能访问当前对象的成员变量，例如：
+
+```cpp
+oss_uploader_
+oss_storage_
+```
+
+如果 lambda 没有捕获 `this`，那么它只能访问自己参数、全局变量、静态函数、以及显式捕获的局部变量，不能直接访问 `CloudDiskServer` 的成员对象。
+
+上传接口外层路由：
+
+```cpp
+server_.POST("/api/v1/files", [this](const HttpReq* req, HttpResp* resp) {
+    ...
+});
+```
+
+这里捕获 `this`，是为了让上传接口内部后续的 MySQL 回调也能继续捕获 `this`。
+
+上传接口的 MySQL 回调：
+
+```cpp
+resp->MySQL(DatabaseURL, sql, [resp,
+                               this,
+                               uid = user.id,
+                               filename,
+                               hashcode,
+                               content](MySQLResultCursor* cursor) {
+    ...
+    oss_uploader_.publish(uid, hashcode, content);
+});
+```
+
+这里必须捕获 `this`，因为 `oss_uploader_` 是 `CloudDiskServer` 的成员变量。MySQL 回调不是普通顺序代码，它会在 SQL 执行完成后异步触发。回调触发时，原来的路由函数已经返回，所以回调要靠捕获列表保存自己后续需要的东西。
+
+捕获列表里每个值的作用不同：
+
+```text
+resp
+  HTTP 响应对象指针，用来返回 JSON。
+
+this
+  当前 CloudDiskServer 对象指针，用来访问成员 oss_uploader_。
+
+uid = user.id
+  把当前用户 id 保存下来，避免外层 user 局部变量失效。
+
+filename / hashcode / content
+  按值保存上传文件信息，供 SQL 完成后继续使用。
+```
+
+下载接口外层路由：
+
+```cpp
+server_.GET("/api/v1/file/{id}", [this](const HttpReq* req, HttpResp* resp) {
+    ...
+});
+```
+
+这里捕获 `this`，是为了让下载接口内部的 MySQL 回调能够访问成员 `oss_storage_`。
+
+下载接口的 MySQL 回调：
+
+```cpp
+resp->MySQL(DatabaseURL, sql, [resp, uid = user.id, this](MySQLResultCursor* cursor) {
+    ...
+    oss_storage_.download_object(uid, hashcode, content);
+});
+```
+
+这里必须捕获 `this`，因为 `oss_storage_` 是 `CloudDiskServer` 的成员变量，不是局部变量。
+
+一句话总结：
+
+```text
+捕获 this，是为了在 HTTP 路由 lambda 和异步 MySQL 回调 lambda 中访问
+CloudDiskServer 的成员对象 oss_uploader_ 和 oss_storage_。
+```
+
+当前项目中 `CloudDiskServer server;` 在 `main()` 中创建，并且程序退出前会先停止 HTTP 服务和后台线程，所以这些回调访问 `this` 的生命周期是可控的。生产项目如果对象生命周期更复杂，还需要用更严格的生命周期管理方式。
 
 ---
 
@@ -280,7 +365,7 @@ POST /api/v1/files
 4. 读取 filename 和 content
 5. 计算 hashcode
 6. INSERT tbl_file 写入 MySQL 元数据
-7. MySQL 写入成功后，调用 backup_.publish(...)
+7. MySQL 写入成功后，调用 oss_uploader_.publish(...)
 8. RabbitMQ 发布成功后，返回上传成功
 ```
 
@@ -400,15 +485,15 @@ size
 
 注意：MySQL 不保存文件内容。真实内容最终保存到 OSS。
 
-### 6. 发布 RabbitMQ 备份任务
+### 6. 发布 RabbitMQ 上传任务
 
 MySQL 插入成功后，执行：
 
 ```cpp
-backup_.publish(uid, hashcode, content)
+oss_uploader_.publish(uid, hashcode, content)
 ```
 
-这里的 `backup_` 是 `RabbitMqBackup` 对象。
+这里的 `oss_uploader_` 是 `RabbitMqOssUploader` 对象。
 
 `publish()` 会把当前上传文件变成一条 RabbitMQ 消息。消息被成功投递到 RabbitMQ 后，HTTP 接口就可以返回上传成功。
 
@@ -441,7 +526,7 @@ Producer -> Exchange -> Queue -> Consumer
 
 ```text
 Producer
-  RabbitMqBackup::publish()
+  RabbitMqOssUploader::publish()
 
 Exchange
   oss.direct
@@ -453,7 +538,7 @@ Routing Key
   oss
 
 Consumer
-  RabbitMqBackup::worker_loop()
+  RabbitMqOssUploader::worker_loop()
 ```
 
 ### 1. Exchange
@@ -563,7 +648,7 @@ oss.queue
 
 ## 七、RabbitMQ 配置
 
-`RabbitMqBackup.cc` 中读取 RabbitMQ 配置：
+`RabbitMqOssUploader.cc` 中读取 RabbitMQ 配置：
 
 ```cpp
 static const string RabbitMqUri =
@@ -667,7 +752,7 @@ Base64 会让数据变大约 1/3。
 
 ---
 
-## 九、生产者：RabbitMqBackup::publish()
+## 九、生产者：RabbitMqOssUploader::publish()
 
 `publish()` 是 RabbitMQ 生产者逻辑。
 
@@ -686,7 +771,7 @@ Base64 会让数据变大约 1/3。
 伪代码：
 
 ```cpp
-bool RabbitMqBackup::publish(int uid,
+bool RabbitMqOssUploader::publish(int uid,
                              const string& hashcode,
                              const string& content)
 {
@@ -749,34 +834,34 @@ durable queue + persistent message
 
 ---
 
-## 十、消费者：RabbitMqBackup::worker_loop()
+## 十、消费者：RabbitMqOssUploader::worker_loop()
 
 `worker_loop()` 是后台消费者线程执行的函数。
 
 它由：
 
 ```cpp
-backup_.start();
+oss_uploader_.start();
 ```
 
 启动。
 
 ### 1. 后台线程生命周期
 
-`RabbitMqBackup::start()`：
+`RabbitMqOssUploader::start()`：
 
 ```cpp
-worker_ = thread(&RabbitMqBackup::worker_loop, this);
+worker_ = thread(&RabbitMqOssUploader::worker_loop, this);
 ```
 
 含义：
 
 ```text
 创建一个后台线程。
-后台线程在当前 RabbitMqBackup 对象上执行 worker_loop()。
+后台线程在当前 RabbitMqOssUploader 对象上执行 worker_loop()。
 ```
 
-`RabbitMqBackup::stop()`：
+`RabbitMqOssUploader::stop()`：
 
 ```cpp
 stopping_ = true;
@@ -1157,6 +1242,10 @@ Failed
 
 ## 十二、下载接口为什么仍然同步访问 OSS
 
+第三期只把“上传后的 OSS 写入”改成 RabbitMQ 异步处理，但没有把“OSS 下载”改成 RabbitMQ。
+
+这不是遗漏，而是因为上传和下载的 HTTP 语义不同。
+
 下载接口：
 
 ```text
@@ -1174,20 +1263,98 @@ GET /api/v1/file/{id}
 6. 返回文件内容
 ```
 
-下载不能异步，因为浏览器这一次请求就是为了拿到文件内容。
+下载不能异步的根本原因是：浏览器这一次 HTTP 请求的目标就是立刻拿到文件内容。
+
+普通下载接口返回的不是 JSON，而是文件字节流：
+
+```text
+HTTP/1.1 200 OK
+Content-Type: application/octet-stream
+Content-Disposition: attachment; filename="a.txt"
+
+<这里是真正的文件内容>
+```
+
+浏览器只有收到这个响应体，才能弹出下载或保存文件。
 
 如果下载也改成 RabbitMQ：
 
 ```text
 浏览器请求下载
   -> 后端发布下载任务
-  -> 后台线程下载
-  -> 浏览器当前请求无法立即拿到文件
+  -> 后端立即返回“任务已提交”
+  -> 后台线程稍后从 OSS 下载文件
 ```
 
-这就不符合普通文件下载接口的语义。
+这里会出现一个关键问题：
 
-所以当前项目只把“上传后的备份”异步化，下载仍然同步读取 OSS。
+```text
+浏览器当前这次 GET 请求应该返回什么？
+```
+
+如果返回 JSON：
+
+```json
+{
+  "status": "success",
+  "message": "下载任务已提交"
+}
+```
+
+那浏览器并没有拿到文件内容，普通下载流程就断了。
+
+如果要让下载也异步，就必须把产品形态改成“离线下载”或“异步导出”：
+
+```text
+1. 用户请求下载
+2. 后端返回一个 taskId
+3. 后台任务从 OSS 下载、压缩或准备文件
+4. 前端轮询 taskId 状态
+5. 准备完成后，后端提供临时下载链接
+6. 用户再发起第二次请求下载文件
+```
+
+这种模式适合：
+
+```text
+1. 批量打包多个文件
+2. 导出大型报表
+3. 准备超大文件
+4. 生成压缩包
+5. 需要长时间处理的离线任务
+```
+
+但当前项目的接口是普通单文件下载：
+
+```text
+GET /api/v1/file/{id}
+```
+
+它的语义就是：
+
+```text
+这次请求直接返回这个文件。
+```
+
+所以当前下载接口必须同步执行：
+
+```text
+查 MySQL -> 从 OSS GetObject -> 把文件内容写入 HTTP 响应
+```
+
+对比来看：
+
+```text
+上传接口
+  用户把文件交给后端后，可以先返回“上传请求已接收”。
+  OSS 写入可以稍后完成，所以适合 RabbitMQ 异步处理。
+
+下载接口
+  用户这次请求就是为了拿到文件内容。
+  后端必须在这次响应中返回文件字节，所以不适合当前这种 RabbitMQ 异步处理。
+```
+
+所以当前项目只把“上传后的 OSS 写入”异步化，下载仍然同步读取 OSS。
 
 ---
 
@@ -1197,7 +1364,7 @@ GET /api/v1/file/{id}
 
 ```text
 1. 写 MySQL 文件元数据
-2. 发布 RabbitMQ 备份任务
+2. 发布 RabbitMQ 上传任务
 3. 后台消费者上传 OSS
 ```
 
@@ -1223,7 +1390,7 @@ OSS 还没有对象
 下载接口返回 404 文件不存在
 ```
 
-当前项目是学习项目，没有专门做“备份中”状态字段。生产项目通常会在 `tbl_file` 增加类似字段：
+当前项目是学习项目，没有专门做“上传中”状态字段。生产项目通常会在 `tbl_file` 增加类似字段：
 
 ```text
 status = pending / ready / failed
@@ -1402,7 +1569,7 @@ RabbitMQ is ready.
 
 ```cmake
 OssStorage.cc
-RabbitMqBackup.cc
+RabbitMqOssUploader.cc
 ```
 
 所以 `CMakeLists.txt` 中：
@@ -1411,7 +1578,7 @@ RabbitMqBackup.cc
 add_executable(server
     CryptoUtil.cc
     OssStorage.cc
-    RabbitMqBackup.cc
+    RabbitMqOssUploader.cc
     CloudDiskServer.cc
     main.cc
 )
@@ -1601,7 +1768,7 @@ Missing environment variable: ALIBABA_CLOUD_OSS_BUCKET
 
 ### 5. 上传成功后立刻下载返回文件不存在
 
-第三期上传是异步备份。
+第三期上传是异步 OSS 上传。
 
 上传接口返回成功时：
 
@@ -1615,6 +1782,69 @@ OSS 可能还在后台上传
 
 当前学习项目没有加文件状态字段，所以这是最终一致性带来的正常现象。
 
+### 6. Windows 浏览器下载中文文件名变成乱码
+
+现象：
+
+```text
+上传文件：数据库表结构.md
+下载后文件名：æ_°æ_®åº_è¡¨ç»_æ__.md
+```
+
+原因在 HTTP 下载响应头 `Content-Disposition`。
+
+早期写法通常是：
+
+```text
+Content-Disposition: attachment; filename="数据库表结构.md"
+```
+
+问题是 `filename=` 对非 ASCII 文件名支持不稳定。中文文件名在 HTTP 头里实际是 UTF-8 字节，如果浏览器或下载逻辑按其它编码解释这些字节，就会看到 `æ...` 这种乱码。
+
+第三期当前代码使用更兼容的写法：
+
+```text
+Content-Disposition:
+  attachment;
+  filename="________.md";
+  filename*=UTF-8''%E6%95%B0%E6%8D%AE%E5%BA%93%E8%A1%A8%E7%BB%93%E6%9E%84.md
+```
+
+其中：
+
+```text
+filename
+  ASCII 兜底文件名，给老浏览器使用。
+
+filename*
+  标准 UTF-8 文件名，使用 RFC 5987 百分号编码。
+  现代浏览器会优先使用它，所以中文可以正常显示。
+```
+
+后端相关代码在 `CloudDiskServer.cc`：
+
+```text
+content_disposition_fallback_filename()
+  生成 ASCII 兜底文件名。
+
+encode_rfc5987_filename()
+  把 UTF-8 文件名转成 filename*=UTF-8''... 格式。
+```
+
+前端因为使用的是 `fetch -> blob -> a.download`，不是浏览器原生直接下载，所以也要自己解析响应头。`www/static/api.js` 中会优先解析：
+
+```text
+filename*=UTF-8''...
+```
+
+然后再退回到：
+
+```text
+filename=...
+```
+
+这样 Windows 上下载中文文件名时，前端传给 `a.download` 的就是正确的中文文件名。
+
 ---
 
 ## 十九、为什么当前项目不继续过度拆分
@@ -1624,7 +1854,7 @@ OSS 可能还在后台上传
 ```text
 CloudDiskServer
 OssStorage
-RabbitMqBackup
+RabbitMqOssUploader
 CryptoUtil
 ```
 
@@ -1668,7 +1898,7 @@ MessageCodec
 3. CloudDiskServer.cc
    重点看 POST /api/v1/files 和 GET /api/v1/file/{id}。
 
-4. RabbitMqBackup.h / RabbitMqBackup.cc
+4. RabbitMqOssUploader.h / RabbitMqOssUploader.cc
    看 RabbitMQ 如何发布消息、如何后台拉取消息。
 
 5. OssStorage.h / OssStorage.cc
@@ -1691,7 +1921,7 @@ MessageCodec
 RabbitMQ 在这里的价值是：
 
 ```text
-1. 把上传接口和 OSS 备份解耦。
+1. 把上传接口和 OSS 上传解耦。
 2. 让 HTTP 响应不再等待 OSS PutObject。
 3. 在 OSS 临时失败时，可以通过消息重新入队重试。
 4. 为后续微服务拆分打基础。

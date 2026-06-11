@@ -1,4 +1,4 @@
-#include "RabbitMqBackup.h"
+#include "RabbitMqOssUploader.h"
 
 #include <SimpleAmqpClient/SimpleAmqpClient.h>
 #include <chrono>
@@ -30,11 +30,6 @@ static string getEnvOrDefault(const char* name, const string& default_value)
 
 /*
     RabbitMQ 连接和路由配置。
-
-    这组名字和 PDF 示例保持一致：
-    - exchange：oss.direct
-    - queue：oss.queue
-    - routing key：oss
 */
 static const string RabbitMqUri = getEnvOrDefault("RABBITMQ_URI", "amqp://guest:guest@localhost:5672/%2f");
 static const string RabbitMqExchange = getEnvOrDefault("RABBITMQ_EXCHANGE", "oss.direct");
@@ -151,19 +146,18 @@ static void declare_rabbitmq_topology(const amqp::Channel::ptr_t& channel)
     channel->BindQueue(RabbitMqQueue, RabbitMqExchange, RabbitMqRoutingKey);
 }
 
-RabbitMqBackup::RabbitMqBackup(OssStorage& oss_storage)
+RabbitMqOssUploader::RabbitMqOssUploader(OssStorage& oss_storage)
     : oss_storage_(oss_storage)
     , stopping_(false)
-{
-}
+{}
 
-RabbitMqBackup::~RabbitMqBackup()
+RabbitMqOssUploader::~RabbitMqOssUploader()
 {
     // 析构时兜底停止线程，避免忘记手动调用 stop()。
     stop();
 }
 
-void RabbitMqBackup::start()
+void RabbitMqOssUploader::start()
 {
     /*
         如果线程已经启动，就不要重复启动。
@@ -174,10 +168,10 @@ void RabbitMqBackup::start()
     }
 
     stopping_ = false;
-    worker_ = thread(&RabbitMqBackup::worker_loop, this);
+    worker_ = thread(&RabbitMqOssUploader::worker_loop, this);
 }
 
-void RabbitMqBackup::stop()
+void RabbitMqOssUploader::stop()
 {
     // 通知后台线程退出循环。
     stopping_ = true;
@@ -191,7 +185,7 @@ void RabbitMqBackup::stop()
     }
 }
 
-bool RabbitMqBackup::publish(int uid, const string& hashcode, const string& content)
+bool RabbitMqOssUploader::publish(int uid, const string& hashcode, const string& content)
 {
     try {
         amqp::Channel::ptr_t channel = create_rabbitmq_channel();
@@ -226,7 +220,7 @@ bool RabbitMqBackup::publish(int uid, const string& hashcode, const string& cont
     }
 }
 
-void RabbitMqBackup::worker_loop()
+void RabbitMqOssUploader::worker_loop()
 {
     /*
         外层循环负责断线重连。
@@ -241,7 +235,6 @@ void RabbitMqBackup::worker_loop()
                 这里使用 BasicGet 拉取模式，而不是 BasicConsume 推送模式。
 
                 原因：
-                - PDF 第 21 页也展示了 BasicGet 这种拉取方式
                 - 当前 SimpleAmqpClient 的推送消费会触发旧式 global_qos
                 - 新版本 RabbitMQ 默认拒绝 global_qos，连接会被服务端关闭
                 - 拉取模式不需要订阅 consumer，也就避开了这个兼容问题

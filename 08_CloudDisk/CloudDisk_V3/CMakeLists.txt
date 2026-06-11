@@ -17,7 +17,7 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ../)
 add_executable(server
     CryptoUtil.cc
     OssStorage.cc
-    RabbitMqBackup.cc
+    RabbitMqOssUploader.cc
     CloudDiskServer.cc
     main.cc
 )
@@ -31,8 +31,8 @@ target_compile_options(server PRIVATE
 )
 
 # OSS SDK 静态库依赖 curl/crypto/pthread；网盘自身还依赖 ssl/jwt/wfrest。
-# 第三期新增 SimpleAmqpClient，用来连接 RabbitMQ 发送和消费备份任务。
-target_link_libraries(server PRIVATE 
+# 第三期新增 SimpleAmqpClient，用来连接 RabbitMQ 发送和消费上传任务。
+target_link_libraries(server PRIVATE
     alibabacloud-oss-cpp-sdk
     SimpleAmqpClient
     rabbitmq

@@ -94,13 +94,19 @@ async function downloadFile(fileId) {
       throw new Error(error.message || `Download failed with status ${response.status}`);
     }
 
-    // Extract filename from Content-Disposition header if present
+    // Extract filename from Content-Disposition header if present.
+    // Prefer filename*=UTF-8''... because it preserves non-ASCII names such as Chinese filenames.
     const contentDisposition = response.headers.get('Content-Disposition');
     let filename = null;
     if (contentDisposition) {
-      const filenameMatch = contentDisposition.match(/filename[^;=\n]*=((['"]).*?\2|[^;\n]*)/);
-      if (filenameMatch && filenameMatch[1]) {
-        filename = filenameMatch[1].replace(/['"]/g, '');
+      const utf8FilenameMatch = contentDisposition.match(/filename\*=UTF-8''([^;\n]*)/i);
+      if (utf8FilenameMatch && utf8FilenameMatch[1]) {
+        filename = decodeURIComponent(utf8FilenameMatch[1]);
+      } else {
+        const filenameMatch = contentDisposition.match(/filename=((['"]).*?\2|[^;\n]*)/i);
+        if (filenameMatch && filenameMatch[1]) {
+          filename = filenameMatch[1].replace(/['"]/g, '');
+        }
       }
     }
 

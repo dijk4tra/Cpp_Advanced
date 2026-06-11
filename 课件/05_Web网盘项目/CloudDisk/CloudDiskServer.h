@@ -1,6 +1,6 @@
 #pragma once
 #include "OssStorage.h"
-#include "RabbitMqBackup.h"
+#include "RabbitMqOssUploader.h"
 
 #include <wfrest/HttpServer.h>
 #include <workflow/WFFacilities.h>
@@ -49,7 +49,7 @@ private:
     // OssStorage 只负责 OSS SDK 生命周期和对象上传/下载。
     OssStorage oss_storage_;
 
-    // RabbitMqBackup 只负责 RabbitMQ 任务发布和后台消费。
+    // RabbitMqOssUploader 只负责 RabbitMQ 任务发布和后台消费。
     // 它需要借用 oss_storage_ 来执行真正的 OSS 上传。
-    RabbitMqBackup backup_;
+    RabbitMqOssUploader oss_uploader_;
 };

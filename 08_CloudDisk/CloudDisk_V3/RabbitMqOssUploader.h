@@ -7,7 +7,7 @@
 #include <thread>
 
 /*
-    RabbitMqBackup 专门负责“异步 OSS 备份任务”。
+    RabbitMqOssUploader 专门负责“异步 OSS 上传任务”。
 
     它的职责包括：
     - 发布上传任务到 RabbitMQ
@@ -17,18 +17,18 @@
 
     它不关心 HTTP 路由，也不关心 MySQL 表结构。
 */
-class RabbitMqBackup {
+class RabbitMqOssUploader {
 public:
     /*
-        传入 OssStorage&，表示 RabbitMqBackup 不拥有 OSS 存储对象。
+        传入 OssStorage&，表示 RabbitMqOssUploader 不拥有 OSS 存储对象。
         它只是“借用”这个对象来执行上传。
     */
-    explicit RabbitMqBackup(OssStorage& oss_storage);
-    ~RabbitMqBackup();
+    explicit RabbitMqOssUploader(OssStorage& oss_storage);
+    ~RabbitMqOssUploader();
 
     // 禁止拷贝，避免复制线程对象和共享停止标志。
-    RabbitMqBackup(const RabbitMqBackup&) = delete;
-    RabbitMqBackup& operator=(const RabbitMqBackup&) = delete;
+    RabbitMqOssUploader(const RabbitMqOssUploader&) = delete;
+    RabbitMqOssUploader& operator=(const RabbitMqOssUploader&) = delete;
 
     // 启动后台消费者线程。
     void start();
@@ -36,7 +36,7 @@ public:
     // 停止后台消费者线程，并等待它退出。
     void stop();
 
-    // 发布一条 OSS 备份任务；成功交给 RabbitMQ 返回 true。
+    // 发布一条 OSS 上传任务；成功交给 RabbitMQ 返回 true。
     bool publish(int uid, const std::string& hashcode, const std::string& content);
 
 private:

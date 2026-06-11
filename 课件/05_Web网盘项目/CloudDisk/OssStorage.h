@@ -37,7 +37,7 @@ public:
     OssStorage(const OssStorage&) = delete;
     OssStorage& operator=(const OssStorage&) = delete;
 
-    // 把 content 上传到 OSS，保存位置由 uid 和 hashcode 共同决定。
+    // 将文件内容 content 上传到 OSS，保存位置由 uid 和 hashcode 共同决定。
     bool upload_object(int uid, const std::string& hashcode, const std::string& content);
 
     // 从 OSS 下载文件内容；成功时 content 会被写入真实文件字节。

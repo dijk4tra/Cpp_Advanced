@@ -91,18 +91,101 @@ static string escape_sql(const string& s)
 }
 
 /*
-    Content-Disposition 的 filename 需要放到响应头里。
-    这里只做最基础的双引号和反斜线转义，避免文件名破坏响应头格式。
+    生成 Content-Disposition 中 filename= 使用的 ASCII 兜底文件名。
+
+    为什么需要兜底文件名？
+    - filename= 这个老参数对非 ASCII 字符支持不好
+    - 中文文件名应该放到 filename*=UTF-8''... 中
+    - 但为了兼容老浏览器，响应头里通常同时保留一个 filename=
+
+    这里把非 ASCII 字节替换成 '_'，避免中文 UTF-8 字节被浏览器按错误编码解释成乱码。
 */
-static string escape_header_filename(const string& filename)
+static string content_disposition_fallback_filename(const string& filename)
 {
     string result;
-    for (char ch : filename) {
+    for (unsigned char ch : filename) {
         if (ch == '"' || ch == '\\') {
             result += '\\';
+            result += ch;
+        } else if (ch >= 0x20 && ch <= 0x7e) {
+            result += ch;
+        } else {
+            result += '_';
         }
-        result += ch;
     }
+
+    if (result.empty()) {
+        return "download";
+    }
+    return result;
+}
+
+/*
+    判断一个字符是否可以直接出现在 RFC 5987 的 filename* 参数中。
+
+    filename* 的格式是：
+        filename*=UTF-8''%E6%95%B0%E6%8D%AE.md
+
+    其中中文等非 ASCII 字节必须做百分号编码。
+*/
+static bool is_rfc5987_attr_char(unsigned char ch)
+{
+    if (ch >= '0' && ch <= '9') {
+        return true;
+    }
+    if (ch >= 'A' && ch <= 'Z') {
+        return true;
+    }
+    if (ch >= 'a' && ch <= 'z') {
+        return true;
+    }
+
+    switch (ch) {
+    case '!':
+    case '#':
+    case '$':
+    case '&':
+    case '+':
+    case '-':
+    case '.':
+    case '^':
+    case '_':
+    case '`':
+    case '|':
+    case '~':
+        return true;
+    default:
+        return false;
+    }
+}
+
+/*
+    把 UTF-8 文件名编码成 filename* 可用的格式。
+
+    例如：
+        数据库表结构.md
+
+    会变成类似：
+        UTF-8''%E6%95%B0%E6%8D%AE%E5%BA%93%E8%A1%A8%E7%BB%93%E6%9E%84.md
+
+    浏览器看到 filename*=UTF-8''... 后，会按 UTF-8 解码文件名，
+    Windows 上下载中文文件名就不会变成 æ... 这种乱码。
+*/
+static string encode_rfc5987_filename(const string& filename)
+{
+    static const char* hex = "0123456789ABCDEF";
+    string result = "UTF-8''";
+
+    for (unsigned char ch : filename) {
+        if (is_rfc5987_attr_char(ch)) {
+            result += ch;
+        } else {
+            result += '%';
+            result += hex[ch >> 4];
+            result += hex[ch & 0x0f];
+        }
+    }
+
     return result;
 }
 
@@ -111,7 +194,6 @@ static string escape_header_filename(const string& filename)
 
     注册和登录都要求 Content-Type: application/json。
     nlohmann::json::parse(..., false) 在解析失败时不会抛异常，而是返回 discarded 状态，
-    对教学项目来说，这样的错误处理更直观。
 */
 static bool parse_json_body(const HttpReq* req, json& body)
 {
@@ -192,15 +274,15 @@ static bool check_login(const HttpReq* req, User& user)
 
 CloudDiskServer::CloudDiskServer()
     : oss_storage_()
-    , backup_(oss_storage_)
+    , oss_uploader_(oss_storage_)
 {
     /*
         CloudDiskServer 现在只负责组织各个模块：
         - oss_storage_ 负责 OSS SDK 生命周期和对象上传/下载
-        - backup_ 负责 RabbitMQ 任务发布和后台消费
-        - 这里启动后台消费者，让异步备份能力随服务器一起启动
+        - oss_uploader_ 负责 RabbitMQ 任务发布和后台消费
+        - 这里启动后台消费者，让异步 OSS 上传能力随服务器一起启动
     */
-    backup_.start();
+    oss_uploader_.start();
 }
 
 CloudDiskServer::~CloudDiskServer()
@@ -209,7 +291,7 @@ CloudDiskServer::~CloudDiskServer()
         先停止 RabbitMQ 后台消费者。
         这样 OssStorage 析构并释放 OSS SDK 前，不会再有后台线程上传文件。
     */
-    backup_.stop();
+    oss_uploader_.stop();
 }
 
 void CloudDiskServer::register_routes()
@@ -244,7 +326,7 @@ void CloudDiskServer::register_auth_module()
     server_.POST("/api/v1/auth/register", [](const HttpReq* req, HttpResp* resp) {
         json body;
         if (!parse_json_body(req, body)) {
-            response_error(resp, HttpStatusBadRequest, "请求格式有误");
+            response_error(resp, HttpStatusBadRequest, "请求格式有误"); // 400
             return;
         }
 
@@ -253,12 +335,12 @@ void CloudDiskServer::register_auth_module()
         string confirm = json_string(body, "confirm");
 
         if (username.empty() || password.empty()) {
-            response_error(resp, HttpStatusBadRequest, "用户名和密码不能为空");
+            response_error(resp, HttpStatusBadRequest, "用户名和密码不能为空"); // 400
             return;
         }
 
         if (password != confirm) {
-            response_error(resp, HttpStatusBadRequest, "两次输入的密码不一致");
+            response_error(resp, HttpStatusBadRequest, "两次输入的密码不一致"); // 400
             return;
         }
 
@@ -312,7 +394,7 @@ void CloudDiskServer::register_auth_module()
     server_.POST("/api/v1/auth/login", [](const HttpReq* req, HttpResp* resp) {
         json body;
         if (!parse_json_body(req, body)) {
-            response_error(resp, HttpStatusBadRequest, "请求格式有误");
+            response_error(resp, HttpStatusBadRequest, "请求格式有误"); // 400
             return;
         }
 
@@ -320,7 +402,7 @@ void CloudDiskServer::register_auth_module()
         string password = json_string(body, "password");
 
         if (username.empty() || password.empty()) {
-            response_error(resp, HttpStatusBadRequest, "用户名和密码不能为空");
+            response_error(resp, HttpStatusBadRequest, "用户名和密码不能为空"); // 400
             return;
         }
 
@@ -354,7 +436,7 @@ void CloudDiskServer::register_auth_module()
                 所以按 PDF 要求返回 500 + “内部服务器错误”。
             */
             if (cursor->get_cursor_status() != MYSQL_STATUS_GET_RESULT) {
-                response_error(resp, HttpStatusInternalServerError, "内部服务器错误");
+                response_error(resp, HttpStatusInternalServerError, "内部服务器错误"); // 500
                 return;
             }
 
@@ -376,7 +458,7 @@ void CloudDiskServer::register_auth_module()
                 因此这里按 PDF 要求返回 401 + “用户名或密码错误”。
             */
             if (cursor->get_rows_count() == 0) {
-                response_error(resp, HttpStatusUnauthorized, "用户名或密码错误");
+                response_error(resp, HttpStatusUnauthorized, "用户名或密码错误"); // 401
                 return;
             }
 
@@ -423,7 +505,7 @@ void CloudDiskServer::register_auth_module()
                 不一致说明密码错误，按 PDF 返回 401 + “用户名或密码错误”。
             */
             if (input_hash != user.password) {
-                response_error(resp, HttpStatusUnauthorized, "用户名或密码错误");
+                response_error(resp, HttpStatusUnauthorized, "用户名或密码错误"); // 401
                 return;
             }
 
@@ -459,7 +541,7 @@ void CloudDiskServer::register_user_module()
     server_.GET("/api/v1/user/me", [](const HttpReq* req, HttpResp* resp) {
         User user;
         if (!check_login(req, user)) {
-            response_error(resp, HttpStatusUnauthorized, "无效的访问令牌");
+            response_error(resp, HttpStatusUnauthorized, "无效的访问令牌"); // 401
             return;
         }
 
@@ -568,6 +650,15 @@ void CloudDiskServer::register_file_module()
         5. 写 tbl_file 记录
         6. 发布 RabbitMQ 消息，让后台消费者异步上传 OSS
     */
+    /*
+        第三期重构后把 OSS/RabbitMQ 能力封装成了 CloudDiskServer 的成员对象.
+        lambda 想访问成员对象，就必须捕获 this.
+        这里捕获 this，是为了让后续的异步 MySQL 回调能够继续访问当前
+        CloudDiskServer 对象中的成员 oss_uploader_。
+
+        this 可以理解为“当前 CloudDiskServer 对象的地址”。
+        不捕获 this，lambda 内部就不能访问成员变量 oss_uploader_。
+    */
     server_.POST("/api/v1/files", [this](const HttpReq* req, HttpResp* resp) {
         User user;
         if (!check_login(req, user)) {
@@ -589,7 +680,7 @@ void CloudDiskServer::register_file_module()
             wfrest 也无法按文件表单解析 body，所以按照 PDF 要求返回 400 + “请求格式有误”。
         */
         if (req->content_type() != MULTIPART_FORM_DATA) {
-            response_error(resp, HttpStatusBadRequest, "请求格式有误");
+            response_error(resp, HttpStatusBadRequest, "请求格式有误"); // 400
             return;
         }
 
@@ -616,7 +707,7 @@ void CloudDiskServer::register_file_module()
             所以这是请求格式错误，返回 400 + “请求格式有误”。
         */
         if (!form.count("file")) {
-            response_error(resp, HttpStatusBadRequest, "请求格式有误");
+            response_error(resp, HttpStatusBadRequest, "请求格式有误"); // 400
             return;
         }
 
@@ -633,7 +724,7 @@ void CloudDiskServer::register_file_module()
             这种情况下后端无法给文件生成用户可见的名称，所以返回 400 + “请求格式有误”。
         */
         if (filename.empty()) {
-            response_error(resp, HttpStatusBadRequest, "请求格式有误");
+            response_error(resp, HttpStatusBadRequest, "请求格式有误"); // 400
             return;
         }
 
@@ -657,6 +748,16 @@ void CloudDiskServer::register_file_module()
 
         cout << "[upload SQL] " << sql << endl;
 
+        /*
+            MySQL 回调会在当前 HTTP 路由函数返回之后才执行。
+            因此 filename/hashcode/content/uid 都必须按值捕获，避免局部变量失效。
+
+            这里额外捕获 this，是因为回调里要调用：
+                oss_uploader_.publish(...)
+
+            oss_uploader_ 是 CloudDiskServer 的成员变量；lambda 只有捕获 this，
+            才能通过当前对象访问这个成员。
+        */
         resp->MySQL(DatabaseURL, sql, [resp,
                                        this,
                                        uid = user.id,
@@ -677,12 +778,12 @@ void CloudDiskServer::register_file_module()
                 所以这里不再细分原因，统一返回“内部服务器错误”。
             */
             if (cursor->get_cursor_status() != MYSQL_STATUS_OK) {
-                response_error(resp, HttpStatusInternalServerError, "内部服务器错误");
+                response_error(resp, HttpStatusInternalServerError, "内部服务器错误"); // 500
                 return;
             }
 
             /*
-                数据库元数据写入成功后，再把 OSS 备份任务发布到 RabbitMQ。
+                数据库元数据写入成功后，再把 OSS 上传任务发布到 RabbitMQ。
 
                 这里发布的是“任务”，不是直接上传 OSS：
                 - HTTP 请求线程只等待 RabbitMQ 接收任务
@@ -691,8 +792,8 @@ void CloudDiskServer::register_file_module()
 
                 这样用户感受到的上传接口耗时不再包含 OSS PutObject 的网络时间。
             */
-            if (!backup_.publish(uid, hashcode, content)) {
-                response_error(resp, HttpStatusInternalServerError, "内部服务器错误");
+            if (!oss_uploader_.publish(uid, hashcode, content)) {
+                response_error(resp, HttpStatusInternalServerError, "内部服务器错误"); // 500
                 return;
             }
 
@@ -713,10 +814,14 @@ void CloudDiskServer::register_file_module()
         4. 设置 Content-Disposition，让浏览器按原始文件名下载
         5. 返回 OSS 对象内容
     */
+    /*
+        这里捕获 this，是为了让下载接口内部的 MySQL 回调能够访问成员
+        oss_storage_，从而调用 oss_storage_.download_object(...)。
+    */
     server_.GET("/api/v1/file/{id}", [this](const HttpReq* req, HttpResp* resp) {
         User user;
         if (!check_login(req, user)) {
-            response_error(resp, HttpStatusUnauthorized, "无效的访问令牌");
+            response_error(resp, HttpStatusUnauthorized, "无效的访问令牌"); // 401
             return;
         }
 
@@ -747,6 +852,13 @@ void CloudDiskServer::register_file_module()
 
         cout << "[download SQL] " << sql << endl;
 
+        /*
+            这里捕获 this，是因为回调里要调用：
+                oss_storage_.download_object(...)
+
+            oss_storage_ 是 CloudDiskServer 的成员变量，不是普通局部变量。
+            lambda 捕获 this 后，才能在异步回调中访问当前服务器对象的成员。
+        */
         resp->MySQL(DatabaseURL, sql, [resp, uid = user.id, this](MySQLResultCursor* cursor) {
             /*
                 下载前需要先 SELECT 文件记录。
@@ -756,7 +868,7 @@ void CloudDiskServer::register_file_module()
                 这属于服务器端或数据库端问题，按 PDF 返回 500。
             */
             if (cursor->get_cursor_status() != MYSQL_STATUS_GET_RESULT) {
-                response_error(resp, HttpStatusInternalServerError, "内部服务器错误");
+                response_error(resp, HttpStatusInternalServerError, "内部服务器错误"); // 500
                 return;
             }
 
@@ -773,7 +885,7 @@ void CloudDiskServer::register_file_module()
                 所以这里统一返回 404。
             */
             if (cursor->get_rows_count() == 0) {
-                response_error(resp, HttpStatusNotFound, "文件不存在");
+                response_error(resp, HttpStatusNotFound, "文件不存在"); // 404
                 return;
             }
 
@@ -787,7 +899,7 @@ void CloudDiskServer::register_file_module()
                 因此按 404 + “文件不存在” 返回。
             */
             if (!cursor->fetch_row(row)) {
-                response_error(resp, HttpStatusNotFound, "文件不存在");
+                response_error(resp, HttpStatusNotFound, "文件不存在"); // 404
                 return;
             }
 
@@ -806,11 +918,11 @@ void CloudDiskServer::register_file_module()
             string content; // 这里的content是传出参数, 若download_object()执行成功, 其就保存了文件内容
             OssDownloadStatus status = oss_storage_.download_object(uid, hashcode, content);
             if (status == OssDownloadStatus::NotFound) {
-                response_error(resp, HttpStatusNotFound, "文件不存在");
+                response_error(resp, HttpStatusNotFound, "文件不存在"); // 404
                 return;
             }
             if (status == OssDownloadStatus::Failed) {
-                response_error(resp, HttpStatusInternalServerError, "内部服务器错误");
+                response_error(resp, HttpStatusInternalServerError, "内部服务器错误"); // 500
                 return;
             }
 
@@ -821,12 +933,20 @@ void CloudDiskServer::register_file_module()
                 Content-Type: application/octet-stream
                     告诉浏览器响应体是通用二进制文件，不要当 JSON 或 HTML 解析。
 
-                Content-Disposition: attachment; filename="..."
-                    告诉浏览器把响应体当附件下载，并使用数据库中保存的原始文件名。
+                Content-Disposition:
+                    告诉浏览器把响应体当附件下载, 并附上文件名
+                    attachment; filename="fallback"; filename*=UTF-8''...
+
+                    filename 是 ASCII 兜底文件名，兼容老浏览器。
+                    filename* 是 RFC 5987 标准写法，用 UTF-8 + 百分号编码保存真实文件名。
+                    中文文件名依赖 filename* 才能在 Windows 浏览器中正确显示。
             */
             resp->add_header("Content-Type", "application/octet-stream");
             resp->add_header("Content-Disposition",
-                             "attachment; filename=\"" + escape_header_filename(filename) + "\"");
+                             "attachment; filename=\"" +
+                                 content_disposition_fallback_filename(filename) +
+                                 "\"; filename*=" +
+                                 encode_rfc5987_filename(filename));
             /*
                 resp->String(...) 把内存中的文件内容写入 HTTP 响应体。
 
