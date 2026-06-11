@@ -934,7 +934,7 @@ void CloudDiskServer::register_file_module()
                     告诉浏览器响应体是通用二进制文件，不要当 JSON 或 HTML 解析。
 
                 Content-Disposition:
-                    告诉浏览器把响应体当附件下载, 并附上文件名
+                    告诉浏览器把响应体当附件下载, 并附上真实文件名
                     attachment; filename="fallback"; filename*=UTF-8''...
 
                     filename 是 ASCII 兜底文件名，兼容老浏览器。

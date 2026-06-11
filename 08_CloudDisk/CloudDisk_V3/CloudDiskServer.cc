@@ -601,7 +601,7 @@ void CloudDiskServer::register_file_module() // 文件模块
             resp->set_status(HttpStatusOK);
             // 告诉浏览器响应体是通用二进制文件，不要当 JSON 或 HTML 解析
             resp->add_header("Content-Type", "application/octet-stream");
-            // 告诉浏览器把响应体当附件下载，并附上文件名
+            // 告诉浏览器把响应体当附件下载，并附上真实文件名
             resp->add_header("Content-Disposition",
                              "attachment; filename=\"" +
                                  content_disposition_fallback_filename(filename) +
