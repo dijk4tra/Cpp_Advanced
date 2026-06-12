@@ -29,3 +29,4 @@ cmake_install.cmake
 .codex
 .agents
 .env
+tmp/

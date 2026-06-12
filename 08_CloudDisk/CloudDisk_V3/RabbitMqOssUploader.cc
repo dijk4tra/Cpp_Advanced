@@ -1,24 +1,27 @@
 #include "RabbitMqOssUploader.h"
+#include "OssStorage.h"
 
+#include <SimpleAmqpClient/BasicMessage.h>
+#include <SimpleAmqpClient/Channel.h>
+#include <SimpleAmqpClient/Envelope.h>
 #include <SimpleAmqpClient/SimpleAmqpClient.h>
 #include <chrono>
 #include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <nlohmann/json.hpp>
-#include <openssl/evp.h>
+#include <sstream>
 #include <stdexcept>
-#include <vector>
+#include <string>
+#include <system_error>
 
 using namespace std;
 using json = nlohmann::json;
 namespace amqp = AmqpClient;
+namespace fs = std::filesystem;
 
-/*
-    读取可选环境变量。
-
-    RabbitMQ 本地开发常用 guest/guest，所以这里提供默认值。
-    如果实际部署的用户名、密码、端口不同，可以在 .env 中覆盖。
-*/
+// 读取.env中的环境变量(若无则使用默认值)
 static string getEnvOrDefault(const char* name, const string& default_value)
 {
     const char* value = getenv(name);
@@ -28,75 +31,48 @@ static string getEnvOrDefault(const char* name, const string& default_value)
     return string(value);
 }
 
-/*
-    RabbitMQ 连接和路由配置。
-*/
+// RabbitMQ 连接和路由配置
 static const string RabbitMqUri = getEnvOrDefault("RABBITMQ_URI", "amqp://guest:guest@localhost:5672/%2f");
 static const string RabbitMqExchange = getEnvOrDefault("RABBITMQ_EXCHANGE", "oss.direct");
 static const string RabbitMqQueue = getEnvOrDefault("RABBITMQ_QUEUE", "oss.queue");
 static const string RabbitMqRoutingKey = getEnvOrDefault("RABBITMQ_ROUTING_KEY", "oss");
 
+// 本地临时文件目录
+static const string TempUploadDir = getEnvOrDefault("CLOUDDISK_TEMP_DIR", "./tmp/uploads");
+
 /*
-    把二进制字符串编码成 Base64。
+    生成临时文件路径。
 
-    RabbitMQ 消息体本身能放二进制，但我们想用 JSON 同时保存 uid、hashcode、content。
-    JSON 字符串需要合法文本，所以先把文件内容转成 Base64。
+    文件名包含 uid、hashcode 和当前时间戳：
+        uid-hashcode-timestamp.tmp
+
+    加时间戳是为了避免同一个用户连续上传同一个文件时，临时文件互相覆盖。
 */
-static string base64_encode(const string& input)
+static fs::path make_temp_file_path(int uid, const string& hashcode)
 {
-    if (input.empty()) {
-        return "";
-    }
-
-    // Base64 编码后长度固定为 4 * ceil(n / 3)。
-    int output_len = 4 * ((input.size() + 2) / 3);
-    string output(output_len, '\0');
-
-    /*
-        OpenSSL 的 EVP_EncodeBlock 按 unsigned char* 处理字节。
-        reinterpret_cast 只是改变指针视角，不会修改原始数据。
-    */
-    EVP_EncodeBlock(reinterpret_cast<unsigned char*>(&output[0]),
-                    reinterpret_cast<const unsigned char*>(input.data()),
-                    input.size());
-    return output;
+    auto now = chrono::system_clock::now().time_since_epoch(); // 获取当前时间
+    auto timestamp = chrono::duration_cast<chrono::nanoseconds>(now).count();
+    string temp_filename = to_string(uid) + "-" + hashcode + "-" + to_string(timestamp) + ".tmp";
+    return fs::path(TempUploadDir) / temp_filename;
 }
 
 /*
-    把 Base64 字符串解码回原始文件内容。
+    从本地临时文件读取完整内容。
 
-    返回 false 表示消息内容损坏，消费者应该丢弃这条消息，而不是无限重试。
+    消费者拿到 RabbitMQ 消息后，只能得到 tempPath。
+    所以真正上传 OSS 之前，要先把这个临时文件重新读回内存。
 */
-static bool base64_decode(const string& input, string& output)
+static bool read_temp_file(const string& temp_path, string& content)
 {
-    if (input.empty()) {
-        output.clear();
-        return true;
-    }
-
-    // 每 4 个 Base64 字符最多还原 3 个原始字节。
-    vector<unsigned char> buffer(input.size() / 4 * 3 + 3);
-    int decoded_len = EVP_DecodeBlock(buffer.data(),
-                                      reinterpret_cast<const unsigned char*>(input.data()),
-                                      input.size());
-    if (decoded_len < 0) {
+    ifstream ifs(temp_path, ios::binary);
+    if (!ifs) {
+        cerr << "[TempFile read FAILED] open failed: " << temp_path << endl;
         return false;
     }
 
-    /*
-        Base64 末尾的 '=' 是补齐符号。
-        EVP_DecodeBlock 返回长度时会把补齐位也算进去，所以这里手动扣掉。
-    */
-    int padding = 0;
-    if (!input.empty() && input[input.size() - 1] == '=') {
-        ++padding;
-    }
-    if (input.size() >= 2 && input[input.size() - 2] == '=') {
-        ++padding;
-    }
-    decoded_len -= padding;
-
-    output.assign(reinterpret_cast<char*>(buffer.data()), decoded_len);
+    ostringstream oss;
+    oss << ifs.rdbuf();
+    content = oss.str();
     return true;
 }
 
@@ -122,33 +98,36 @@ static amqp::Channel::ptr_t create_rabbitmq_channel()
 static void declare_rabbitmq_topology(const amqp::Channel::ptr_t& channel)
 {
     /*
-        direct 交换机要求 routing key 精确匹配。
-        durable=true 表示 RabbitMQ 重启后交换机仍然存在。
+        EXCHANGE_TYPE_DIRECT 交换机要求 routing key 精确匹配。
+        passive=false 表示如果交换机不存在，就创建它。
+        durable=true 表示交换机是持久化交换机, RabbitMQ 重启后交换机仍然存在。
+        auto_delete=false 表示交换机不会因为没有队列绑定、没有消费者或连接断开而自动删除。
     */
-    channel->DeclareExchange(RabbitMqExchange,
-                             amqp::Channel::EXCHANGE_TYPE_DIRECT,
-                             false,
-                             true,
-                             false);
+    channel->DeclareExchange(RabbitMqExchange,                     // exchange_name
+                             amqp::Channel::EXCHANGE_TYPE_DIRECT,  // exchange_type
+                             false,                                // passive
+                             true,                                 // durable
+                             false);                               // auto_delete
 
     /*
-        durable=true 表示队列持久化。
+        passive=false 表示队列不存在时自动创建。
+        durable=true 表示队列是持久化队列。
         exclusive=false 表示不是当前连接独占，后续可以启动多个消费者。
-        auto_delete=false 表示连接断开后队列不会自动删除。
+        auto_delete=false 表示没有消费者时队列也不会自动删除。
     */
-    channel->DeclareQueue(RabbitMqQueue,
-                          false,
-                          true,
-                          false,
-                          false);
+    channel->DeclareQueue(RabbitMqQueue, // queue_name
+                          false,         // passive
+                          true,          // durable
+                          false,         // exclusive
+                          false);        // auto_delete
 
-    // 绑定后，routing key 为 oss 的消息会进入 oss.queue。
+    // 绑定后，routing key 为 oss 的消息会进入 oss.queue
     channel->BindQueue(RabbitMqQueue, RabbitMqExchange, RabbitMqRoutingKey);
 }
 
 RabbitMqOssUploader::RabbitMqOssUploader(OssStorage& oss_storage)
     : oss_storage_(oss_storage)
-    , stopping_(false)
+    , stopping_(false)          // 设置停止标志为 false
 {}
 
 RabbitMqOssUploader::~RabbitMqOssUploader()
@@ -167,13 +146,13 @@ void RabbitMqOssUploader::start()
         return;
     }
 
-    stopping_ = false;
-    worker_ = thread(&RabbitMqOssUploader::worker_loop, this);
+    stopping_ = false; // 启动前把停止标志重置为 false，表示允许 worker_loop 运行
+    worker_ = thread(&RabbitMqOssUploader::worker_loop, this); // 创建后台线程，执行当前对象的 worker_loop 成员函数
 }
 
 void RabbitMqOssUploader::stop()
 {
-    // 通知后台线程退出循环。
+    // 通知后台线程退出循环
     stopping_ = true;
 
     /*
@@ -185,9 +164,72 @@ void RabbitMqOssUploader::stop()
     }
 }
 
-bool RabbitMqOssUploader::publish(int uid, const string& hashcode, const string& content)
+bool RabbitMqOssUploader::save_temp_file(int uid,
+                                         const string &hashcode,
+                                         const string &content,
+                                         string &temp_path)
 {
     try {
+        /*
+            create_directories 会递归创建目录。
+            如果 ./tmp 不存在，它会先创建 ./tmp，再创建 ./tmp/uploads。
+            如果目录已经存在，也不会报错。
+        */
+        fs::create_directories(TempUploadDir);
+
+        fs::path path = make_temp_file_path(uid, hashcode);
+
+        /*
+            ios::binary 表示按二进制方式写入。
+            这样文本、图片、压缩包等任意文件内容都不会被换行转换影响。
+        */
+        ofstream ofs(path, ios::binary);
+        if (!ofs) {
+            cerr << "[TempFile write FAILED] open failed: " << path.string() << endl;
+            return false;
+        }
+
+        ofs.write(content.data(), content.size());
+        if (!ofs) {
+            cerr << "[TempFile write FAILED] write failed: " << path.string() << endl;
+            return false;
+        }
+
+        temp_path = path.string();
+        cout << "[TempFile write OK] " << temp_path << endl;
+        return true;
+    } catch (const exception& ex) {
+        cerr << "[TempFile write ERROR] " << ex.what() << endl;
+        return false;
+    }
+}
+
+void RabbitMqOssUploader::remove_temp_file(const string& temp_path)
+{
+    if (temp_path.empty()) {
+        return;
+    }
+
+    /*
+        使用 error_code 版本的 remove：
+        - 删除失败时不会抛异常
+        - 可以把错误打印出来，方便排查权限或路径问题
+    */
+    error_code ec;
+    bool removed = fs::remove(temp_path, ec);
+    if (ec) {
+        cerr << "[TempFile remove FAILED] " << temp_path << ", error: " << ec.message() << endl;
+        return;
+    }
+
+    if (removed) {
+        cout << "[TempFile remove OK] " << temp_path << endl;
+    }
+}
+
+bool RabbitMqOssUploader::publish(int uid, const string &hashcode, const string &temp_path)
+{
+    try{
         amqp::Channel::ptr_t channel = create_rabbitmq_channel();
         declare_rabbitmq_topology(channel);
 
@@ -196,12 +238,12 @@ bool RabbitMqOssUploader::publish(int uid, const string& hashcode, const string&
             uid/hashcode 决定 OSS ObjectName：
                 users/{uid}/{hashcode}
 
-            contentBase64 保存真实文件内容。
-            消费者收到后先解码，再调用 OssStorage 上传。
+            tempPath 指向 HTTP 上传接口保存的本地临时文件。
+            RabbitMQ 消息只传路径，不再携带真实文件内容。
         */
         task["uid"] = uid;
         task["hashcode"] = hashcode;
-        task["contentBase64"] = base64_encode(content);
+        task["tempPath"] = temp_path;
 
         amqp::BasicMessage::ptr_t message = amqp::BasicMessage::Create(task.dump());
         message->ContentType("application/json");
@@ -232,27 +274,31 @@ void RabbitMqOssUploader::worker_loop()
             declare_rabbitmq_topology(channel);
 
             /*
-                这里使用 BasicGet 拉取模式，而不是 BasicConsume 推送模式。
+                使用 BasicConsume 推送模式订阅队列。
 
-                原因：
-                - 当前 SimpleAmqpClient 的推送消费会触发旧式 global_qos
-                - 新版本 RabbitMQ 默认拒绝 global_qos，连接会被服务端关闭
-                - 拉取模式不需要订阅 consumer，也就避开了这个兼容问题
-
-                对学习项目来说，每秒轮询一次队列足够直观，也足够使用。
+                参数含义：
+                - no_ack=false：关闭自动确认，处理成功后手动 BasicAck
+                - exclusive=false：不独占队列，后续可以启动多个消费者
+                - message_prefetch_count=1：一次只推送一条未确认消息
             */
-            cout << "[RabbitMQ consumer] polling messages from " << RabbitMqQueue << endl;
+            string consumer_tag = channel->BasicConsume(RabbitMqQueue, // queue
+                                                        "",            // consumer_tag
+                                                        true,          // no_local
+                                                        false,         // no_ack
+                                                        false,         // exclusive
+                                                        1);            // message_prefetch_count
+            cout << "[RabbitMQ consumer] waiting for pushed messages from "
+                 << RabbitMqQueue << endl;
 
             /*
                 内层循环负责正常消费消息：
-                1. BasicGet 主动从队列取一条消息
-                2. 队列为空时返回 false，不会阻塞
-                3. 没取到消息就 sleep 1 秒，避免空循环占满 CPU
+                1. BasicConsumeMessage 阻塞等待 RabbitMQ 推送消息
+                2. timeout=1000ms，让线程能定期检查 stopping_ 并退出
+                3. 收到消息后解析、上传、ack/reject
             */
             while (!stopping_) {
                 amqp::Envelope::ptr_t envelope;
-                if (!channel->BasicGet(envelope, RabbitMqQueue, false)) {
-                    this_thread::sleep_for(chrono::seconds(1));
+                if (!channel->BasicConsumeMessage(consumer_tag, envelope, 1000)) {
                     continue;
                 }
 
@@ -267,8 +313,8 @@ void RabbitMqOssUploader::worker_loop()
                     || !task["uid"].is_number_integer()
                     || !task.contains("hashcode")
                     || !task["hashcode"].is_string()
-                    || !task.contains("contentBase64")
-                    || !task["contentBase64"].is_string()) {
+                    || !task.contains("tempPath")
+                    || !task["tempPath"].is_string()) {
                     /*
                         消息格式坏了，重新入队也无法修复。
                         BasicReject(..., false) 表示丢弃这条消息。
@@ -280,10 +326,18 @@ void RabbitMqOssUploader::worker_loop()
 
                 int uid = task["uid"].get<int>();
                 string hashcode = task["hashcode"].get<string>();
-                string content_base64 = task["contentBase64"].get<string>();
+                string temp_path = task["tempPath"].get<string>();
                 string content;
-                if (!base64_decode(content_base64, content)) {
-                    cerr << "[RabbitMQ consume FAILED] invalid base64 content" << endl;
+
+                /*
+                    RabbitMQ 消息里只有临时文件路径。
+                    消费者要先把这个临时文件读回内存，再调用 OSS SDK 上传。
+
+                    如果临时文件已经不存在，说明这条任务无法继续完成。
+                    重新入队也找不回文件，所以这里丢弃消息。
+                */
+                if (!read_temp_file(temp_path, content)) {
+                    cerr << "[RabbitMQ consume FAILED] temp file missing or unreadable" << endl;
                     channel->BasicReject(envelope, false);
                     continue;
                 }
@@ -294,11 +348,17 @@ void RabbitMqOssUploader::worker_loop()
                 */
                 if (oss_storage_.upload_object(uid, hashcode, content)) {
                     channel->BasicAck(envelope);
+                    /*
+                        OSS 上传成功后，临时文件已经没有用了。
+                        这里立即删除，避免本地磁盘越积越多。
+                    */
+                    remove_temp_file(temp_path);
                     cout << "[RabbitMQ consume OK] uid=" << uid << ", hashcode=" << hashcode << endl;
                 } else {
                     /*
                         OSS 上传失败可能是临时网络或服务异常。
                         requeue=true 表示把消息放回队列，稍后继续重试。
+                        注意：这里不能删除临时文件，因为下次重试还要读取它。
                     */
                     cerr << "[RabbitMQ consume FAILED] OSS upload failed, requeue message" << endl;
                     channel->BasicReject(envelope, true);

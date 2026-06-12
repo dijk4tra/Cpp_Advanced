@@ -481,7 +481,22 @@ void CloudDiskServer::register_file_module() // 文件模块
             return;
         }
 
-        string hashcode = CryptoUtil::generate_hashcode(content.data(), content.size());
+        string hashcode = CryptoUtil::generate_hashcode(content.data(), content.size()); // 计算文件内容哈希
+
+        string temp_path;
+        /*
+            RabbitMQ 消息不直接携带文件内容。
+
+            这里先把文件内容保存到服务器本地临时目录：
+                ./tmp/uploads/...
+
+            后续 RabbitMQ 消息只保存 tempPath、uid、hashcode。
+            消费者拿到消息后，根据 tempPath 读取临时文件，再上传 OSS。
+        */
+        if (!oss_uploader_.save_temp_file(user.id, hashcode, content, temp_path)) {
+            response_error(resp, HttpStatusInternalServerError, "内部服务器错误"); // 500
+            return;
+        }
 
         string sql =
             "INSERT INTO tbl_file (uid, filename, hashcode, size) VALUES (" +
@@ -494,7 +509,7 @@ void CloudDiskServer::register_file_module() // 文件模块
 
         /*
             MySQL 回调会在当前 HTTP 路由函数返回之后才执行。
-            因此 filename/hashcode/content/uid 都必须按值捕获，避免局部变量失效。
+            因此 filename/hashcode/temp_path/uid 都必须按值捕获，避免局部变量失效。
 
             这里额外捕获 this，是因为回调里要调用：
                 oss_uploader_.publish(...)
@@ -507,17 +522,24 @@ void CloudDiskServer::register_file_module() // 文件模块
                                        uid = user.id,
                                        filename,
                                        hashcode,
-                                       content](MySQLResultCursor* cursor) {
+                                       temp_path](MySQLResultCursor* cursor) {
 
             // INSERT 成功时 cursor 状态应为 MYSQL_STATUS_OK
             if (cursor->get_cursor_status() != MYSQL_STATUS_OK) {
+                /*
+                    MySQL 元数据写入失败时，这个上传任务不会继续进入 RabbitMQ。
+                    因此刚才保存的临时文件也应该删除，避免磁盘残留无用文件。
+                */
+                oss_uploader_.remove_temp_file(temp_path);
                 response_error(resp, HttpStatusInternalServerError, "内部服务器错误"); // 500
                     return;
             }
 
             // 数据库元数据写入成功后，再把 OSS 上传任务发布到 RabbitMQ
             // 这样用户感受到的上传接口耗时不再包含 OSS PutObject 的网络时间
-            if (!oss_uploader_.publish(uid, hashcode, content)) {
+            if (!oss_uploader_.publish(uid, hashcode, temp_path)) {
+                // RabbitMQ 发布失败时，同样要删除临时文件
+                oss_uploader_.remove_temp_file(temp_path);
                 response_error(resp, HttpStatusInternalServerError, "内部服务器错误"); // 500
                 return;
             }

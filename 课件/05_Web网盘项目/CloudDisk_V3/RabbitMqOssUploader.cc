@@ -120,10 +120,8 @@ static amqp::Channel::ptr_t create_rabbitmq_channel()
 static void declare_rabbitmq_topology(const amqp::Channel::ptr_t& channel)
 {
     /*
-        EXCHANGE_TYPE_DIRECT 交换机要求 routing key 精确匹配。
-        passive=false 表示如果交换机不存在，就创建它。
-        durable=true 表示交换机是持久化交换机, RabbitMQ 重启后交换机仍然存在。
-        auto_delete=false 表示交换机不会因为没有队列绑定、没有消费者或连接断开而自动删除。
+        direct 交换机要求 routing key 精确匹配。
+        durable=true 表示 RabbitMQ 重启后交换机仍然存在。
     */
     channel->DeclareExchange(RabbitMqExchange,                     // exchange_name
                              amqp::Channel::EXCHANGE_TYPE_DIRECT,  // exchange_type
@@ -132,10 +130,9 @@ static void declare_rabbitmq_topology(const amqp::Channel::ptr_t& channel)
                              false);                               // auto_delete
 
     /*
-        passive=false 表示队列不存在时自动创建。
-        durable=true 表示队列是持久化队列。
+        durable=true 表示队列持久化。
         exclusive=false 表示不是当前连接独占，后续可以启动多个消费者。
-        auto_delete=false 表示没有消费者时队列也不会自动删除。
+        auto_delete=false 表示连接断开后队列不会自动删除。
     */
     channel->DeclareQueue(RabbitMqQueue, // queue_name
                           false,         // passive
@@ -168,8 +165,8 @@ void RabbitMqOssUploader::start()
         return;
     }
 
-    stopping_ = false; // 启动前把停止标志重置为 false，表示允许 worker_loop 运行
-    worker_ = thread(&RabbitMqOssUploader::worker_loop, this); // 创建后台线程，执行当前对象的 worker_loop 成员函数
+    stopping_ = false;
+    worker_ = thread(&RabbitMqOssUploader::worker_loop, this);
 }
 
 void RabbitMqOssUploader::stop()
