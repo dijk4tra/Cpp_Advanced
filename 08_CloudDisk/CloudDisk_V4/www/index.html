@@ -552,7 +552,13 @@
       const k = 1024;
       const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
       const i = Math.floor(Math.log(numBytes) / Math.log(k));
+      if (!Number.isFinite(i) || i < 0 || i >= sizes.length) {
+        return '0 B';
+      }
       const formattedSize = parseFloat((numBytes / Math.pow(k, i)).toFixed(2));
+      if (!Number.isFinite(formattedSize)) {
+        return '0 B';
+      }
       // 避免显示 "-0" 的情况
       return (formattedSize === 0 ? '0' : formattedSize) + ' ' + sizes[i];
     }
