@@ -14,10 +14,11 @@ void sig_handler(int)
 int main()
 {
     signal(SIGINT, sig_handler);
-    srand(time(NULL));
+    srand(time(NULL)); // 设置随机种子
 
     CloudDiskServer server;
 
+    // 注册路由
     server.register_routes();
 
     if (server.start(8888) == 0) {

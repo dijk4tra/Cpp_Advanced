@@ -21,8 +21,6 @@ int main()
     // 注册路由
     server.register_routes();
 
-    // server.start();
-
     if (server.start(8888) == 0) {
         // server.list_routes();
         waitGroup.wait();

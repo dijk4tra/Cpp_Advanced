@@ -10,8 +10,10 @@ public:
     CloudDiskServer();
     ~CloudDiskServer();
 
+    // 注册路由
     void register_routes();
 
+    // 包装了一层: 要保证包装后的接口与原来的接口一致！
     int start(unsigned short port)
     {
         return server_.start(port);
@@ -22,6 +24,7 @@ public:
     void list_routes() { server_.list_routes(); }
 
 private:
+    // 注册路由
     void register_www_module();
     void register_auth_module();
     void register_user_module();
@@ -30,10 +33,27 @@ private:
 private:
     wfrest::HttpServer server_;
 
-    // 网关只发布上传任务；后台消费和 OSS 上传由 oss_upload_worker 负责。
+    // RabbitMqOssUploader 在网关进程中只负责：
+    // 1. 保存上传临时文件
+    // 2. 删除无用临时文件
+    // 3. 发布 RabbitMQ 上传任务
+    //
+    // 第四期开始，后台消费和 OSS 上传由独立的 oss_upload_worker 进程负责，
+    // 所以 CloudDiskServer 构造函数不再调用 oss_uploader_.start()。
+    //
+    // 注意：这里使用 RabbitMqOssUploader 的默认构造函数，不持有 OssStorage。
+    // 网关只有下载接口需要 OSS；下载时在局部创建 OssStorage 即可。
     RabbitMqOssUploader oss_uploader_;
 
+    // AuthService 的 srpc 客户端。
+    // 网关通过它调用 Register/Login/VerifyToken。
     cloud::disk::AuthService::SRPCClient auth_client_;
+
+    // UserService 的 srpc 客户端。
+    // 网关通过它调用 GetUserProfile。
     cloud::disk::UserService::SRPCClient user_client_;
+
+    // FileMetaService 的 srpc 客户端。
+    // 网关通过它调用 ListFiles/CreateFile/GetFileForDownload。
     cloud::disk::FileMetaService::SRPCClient filemeta_client_;
 };

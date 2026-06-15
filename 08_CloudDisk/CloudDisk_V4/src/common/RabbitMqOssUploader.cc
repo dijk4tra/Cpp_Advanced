@@ -29,7 +29,7 @@ static const string RabbitMqExchange = getEnvOrDefault("RABBITMQ_EXCHANGE", "oss
 static const string RabbitMqQueue = getEnvOrDefault("RABBITMQ_QUEUE", "oss.queue");
 static const string RabbitMqRoutingKey = getEnvOrDefault("RABBITMQ_ROUTING_KEY", "oss");
 
-// RabbitMQ 消息只携带 tempPath，真实文件内容先落到本地临时目录。
+// RabbitMQ 消息只携带 tempPath，真实文件内容先保存至本地临时目录。
 static const string TempUploadDir = getEnvOrDefault("CLOUDDISK_TEMP_DIR", "./tmp/uploads");
 
 static fs::path make_temp_file_path(int uid, const string& hashcode)
