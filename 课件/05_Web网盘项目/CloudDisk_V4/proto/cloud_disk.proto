@@ -1,0 +1,210 @@
+syntax = "proto3";
+
+/*
+    package 会影响 C++ 生成代码的命名空间。
+    cloud.disk 在 C++ 中会变成 cloud::disk。
+    这样所有消息和服务都放在同一个命名空间里，避免和其它示例代码重名。
+*/
+package cloud.disk;
+
+/*
+    CommonResult 是每个 RPC 响应共用的结果头。
+
+    为什么不直接让 RPC 失败？
+    - RPC 失败表示网络错误、服务不可达、序列化失败等“通信层错误”。
+    - 用户名已存在、密码错误、文件不存在是“业务层结果”。
+    - 所以业务结果放到响应消息里，用 code/message 表示。
+
+    code 约定：
+    - 0 表示业务成功。
+    - 400/401/404/409/500 直接对应 HTTP 状态码，方便网关转换响应。
+*/
+message CommonResult {
+  int32 code = 1;
+  string message = 2;
+}
+
+/*
+    UserIdentity 表示已经认证过的用户身份。
+
+    它会出现在：
+    - 登录响应里：告诉前端当前登录用户是谁。
+    - Token 校验响应里：告诉网关这个 token 属于哪个用户。
+    - 用户资料响应里：告诉前端用户资料。
+*/
+message UserIdentity {
+  int32 user_id = 1;
+  string username = 2;
+  string created_at = 3;
+}
+
+/*
+    注册请求只需要 username/password。
+
+    HTTP 表单里的 confirm 只是前端/网关层用来确认两次密码是否一致，
+    AuthService 不需要知道 confirm 字段。
+*/
+message RegisterRequest {
+  string username = 1;
+  string password = 2;
+}
+
+/*
+    注册响应在成功时返回新用户 id 和用户名。
+*/
+message RegisterResponse {
+  CommonResult result = 1;
+  int32 user_id = 2;
+  string username = 3;
+}
+
+/*
+    登录请求包含用户名和明文密码。
+
+    明文密码只在本次 RPC 请求中传输，AuthService 会用数据库中的 salt
+    重新计算哈希，不会把明文密码保存到数据库。
+*/
+message LoginRequest {
+  string username = 1;
+  string password = 2;
+}
+
+/*
+    登录响应成功时返回 Bearer Token 和用户基础信息。
+*/
+message LoginResponse {
+  CommonResult result = 1;
+  string access_token = 2;
+  string token_type = 3;
+  UserIdentity user = 4;
+}
+
+/*
+    Token 校验请求只携带从 HTTP Authorization 头中解析出的 token 字符串。
+*/
+message VerifyTokenRequest {
+  string access_token = 1;
+}
+
+/*
+    Token 校验成功时返回 token 中携带的用户身份。
+*/
+message VerifyTokenResponse {
+  CommonResult result = 1;
+  UserIdentity user = 2;
+}
+
+/*
+    AuthService 负责认证相关能力：
+    - 注册
+    - 登录
+    - 校验 token
+*/
+service AuthService {
+  rpc Register(RegisterRequest) returns (RegisterResponse);
+  rpc Login(LoginRequest) returns (LoginResponse);
+  rpc VerifyToken(VerifyTokenRequest) returns (VerifyTokenResponse);
+}
+
+/*
+    查询用户资料时，网关已经通过 AuthService.VerifyToken 得到了 user_id。
+    所以 UserService 不再接收 token，只接收明确的 user_id。
+*/
+message GetUserProfileRequest {
+  int32 user_id = 1;
+}
+
+/*
+    用户资料响应。
+*/
+message GetUserProfileResponse {
+  CommonResult result = 1;
+  UserIdentity user = 2;
+}
+
+/*
+    UserService 负责用户资料相关能力。
+    当前学习项目只有“查询当前用户资料”一个 RPC。
+*/
+service UserService {
+  rpc GetUserProfile(GetUserProfileRequest) returns (GetUserProfileResponse);
+}
+
+/*
+    FileInfo 是文件列表中每一行的展示数据。
+*/
+message FileInfo {
+  int32 file_id = 1;
+  string filename = 2;
+  int64 size = 3;
+  string created_at = 4;
+  string updated_at = 5;
+}
+
+/*
+    查询文件列表只需要当前用户 id。
+    用户 id 来自 token 校验结果，不来自前端参数。
+*/
+message ListFilesRequest {
+  int32 user_id = 1;
+}
+
+/*
+    文件列表响应，files 可以为空数组。
+*/
+message ListFilesResponse {
+  CommonResult result = 1;
+  repeated FileInfo files = 2;
+}
+
+/*
+    创建文件元数据请求。
+
+    注意：这里不传文件内容。
+    文件内容仍然由 API Gateway 接收、保存成临时文件，再通过 RabbitMQ 交给 worker 上传 OSS。
+*/
+message CreateFileRequest {
+  int32 user_id = 1;
+  string filename = 2;
+  string hashcode = 3;
+  int64 size = 4;
+}
+
+/*
+    创建文件元数据响应。
+*/
+message CreateFileResponse {
+  CommonResult result = 1;
+  int32 file_id = 2;
+  string filename = 3;
+}
+
+/*
+    下载前查询文件元数据。
+
+    API Gateway 拿到 filename/hashcode 后，自己调用 OSS 下载文件内容，
+    然后把字节流写入 HTTP 响应。
+*/
+message GetFileForDownloadRequest {
+  int32 user_id = 1;
+  int32 file_id = 2;
+}
+
+/*
+    下载元数据响应。
+*/
+message GetFileForDownloadResponse {
+  CommonResult result = 1;
+  string filename = 2;
+  string hashcode = 3;
+}
+
+/*
+    FileMetaService 只负责 tbl_file 元数据。
+    它不解析 HTTP，不处理 multipart，不接触 OSS，也不发布 RabbitMQ。
+*/
+service FileMetaService {
+  rpc ListFiles(ListFilesRequest) returns (ListFilesResponse);
+  rpc CreateFile(CreateFileRequest) returns (CreateFileResponse);
+  rpc GetFileForDownload(GetFileForDownloadRequest) returns (GetFileForDownloadResponse);
+}
