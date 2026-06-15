@@ -1,4 +1,5 @@
 #include "../common/CryptoUtil.h"
+#include "../common/ServiceRegistry.h"
 #include "../common/ServiceCommon.h"
 #include "../../rpc_gen/cloud_disk.srpc.h"
 
@@ -368,6 +369,15 @@ int main()
     unsigned short port = get_env_port("AUTH_SERVICE_PORT", 9001);
 
     /*
+        读取当前服务注册到 Consul 时使用的地址。
+
+        本机学习环境默认是 127.0.0.1。
+        如果把服务部署到其它机器，这里应该通过 CLOUDDISK_SERVICE_HOST
+        配成 API Gateway 能访问到的内网 IP。
+    */
+    string service_host = get_service_registry_host();
+
+    /*
         创建 srpc 服务器。
     */
     srpc::SRPCServer server;
@@ -390,9 +400,35 @@ int main()
         cout << "[AuthService] listening on " << port << endl;
 
         /*
+            AuthService 启动成功后，向 Consul 注册当前服务实例。
+
+            注意顺序：
+            1. 先 server.start(port)，确保 srpc 端口已经监听；
+            2. 再注册到 Consul，避免网关发现一个尚未真正可连接的实例。
+        */
+        ServiceRegistrar registrar("AuthService", service_host, port);
+
+        /*
+            start() 内部会注册服务并启动 TTL 心跳线程。
+
+            第五期要求服务必须注册到 Consul。
+            如果注册失败，这里直接停止 srpc server 并退出。
+        */
+        if (!registrar.start()) {
+            server.stop();
+            google::protobuf::ShutdownProtobufLibrary();
+            return 1;
+        }
+
+        /*
             阻塞等待 Ctrl+C。
         */
         wait_group.wait();
+
+        /*
+            退出前停止 TTL 心跳，并从 Consul 注销当前服务实例。
+        */
+        registrar.stop();
 
         /*
             收到退出信号后停止服务。

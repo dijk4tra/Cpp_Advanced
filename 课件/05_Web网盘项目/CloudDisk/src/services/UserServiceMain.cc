@@ -1,4 +1,5 @@
 #include "../common/ServiceCommon.h"
+#include "../common/ServiceRegistry.h"
 #include "../../rpc_gen/cloud_disk.srpc.h"
 
 #include <csignal>
@@ -173,6 +174,15 @@ int main()
     unsigned short port = get_env_port("USER_SERVICE_PORT", 9002);
 
     /*
+        读取注册到 Consul 时对外暴露的服务地址。
+
+        本机运行时默认 127.0.0.1。
+        如果 API Gateway 和 UserService 不在同一台机器上，
+        这里必须配置成网关能访问到的地址。
+    */
+    string service_host = get_service_registry_host();
+
+    /*
         创建 srpc server。
     */
     srpc::SRPCServer server;
@@ -194,9 +204,32 @@ int main()
         cout << "[UserService] listening on " << port << endl;
 
         /*
+            UserService 启动成功后注册到 Consul。
+
+            这样 API Gateway 后续可以按服务名 UserService 查询健康实例，
+            而不是写死 127.0.0.1:9002。
+        */
+        ServiceRegistrar registrar("UserService", service_host, port);
+
+        /*
+            第五期要求服务必须注册到 Consul。
+            如果注册失败，这里直接停止 srpc server 并退出。
+        */
+        if (!registrar.start()) {
+            server.stop();
+            google::protobuf::ShutdownProtobufLibrary();
+            return 1;
+        }
+
+        /*
             阻塞等待退出信号。
         */
         wait_group.wait();
+
+        /*
+            退出前停止 Consul TTL 心跳，并注销当前服务实例。
+        */
+        registrar.stop();
 
         /*
             停止 srpc server。

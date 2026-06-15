@@ -4,6 +4,7 @@
 
 #include <cstdlib>
 #include <iostream>
+#include <memory>
 #include <nlohmann/json.hpp>
 #include <string>
 #include <utility>
@@ -19,90 +20,6 @@ using json = nlohmann::json;
     这样后面写 pb::LoginRequest 比 cloud::disk::LoginRequest 更短。
 */
 namespace pb = cloud::disk;
-
-/*
-    读取字符串环境变量。
-
-    第四期暂时不引入配置中心，服务地址先从环境变量读取；
-    如果没有配置，就使用本地默认值。
-*/
-static string get_env_or_default(const char* name, const string& default_value)
-{
-    /*
-        getenv() 返回环境变量字符串。
-        变量不存在时返回 nullptr。
-    */
-    const char* value = getenv(name);
-
-    /*
-        未配置或配置为空时使用默认值。
-    */
-    if (value == nullptr || string(value).empty()) {
-        return default_value;
-    }
-
-    /*
-        返回环境变量中的实际值。
-    */
-    return string(value);
-}
-
-/*
-    读取端口环境变量。
-
-    参数：
-    - name：环境变量名。
-    - default_port：默认端口。
-*/
-static unsigned short get_env_port(const char* name, unsigned short default_port)
-{
-    /*
-        先读取环境变量字符串。
-    */
-    const char* value = getenv(name);
-
-    /*
-        没有配置就使用默认端口。
-    */
-    if (value == nullptr || string(value).empty()) {
-        return default_port;
-    }
-
-    /*
-        把字符串转成长整数。
-    */
-    char* end = nullptr;
-    long port = strtol(value, &end, 10);
-
-    /*
-        如果字符串不是纯数字，或者端口超出合法范围，就回退到默认端口。
-    */
-    if (*end != '\0' || port <= 0 || port > 65535) {
-        return default_port;
-    }
-
-    /*
-        范围已经检查过，可以安全转换。
-    */
-    return static_cast<unsigned short>(port);
-}
-
-/*
-    三个后端微服务的地址。
-
-    第四期先用本地固定默认值：
-    - AuthService: 9001
-    - UserService: 9002
-    - FileMetaService: 9003
-
-    第五期引入 Consul 后，网关就不需要硬编码这些地址。
-*/
-static const string AuthServiceHost = get_env_or_default("AUTH_SERVICE_HOST", "127.0.0.1");
-static const unsigned short AuthServicePort = get_env_port("AUTH_SERVICE_PORT", 9001);
-static const string UserServiceHost = get_env_or_default("USER_SERVICE_HOST", "127.0.0.1");
-static const unsigned short UserServicePort = get_env_port("USER_SERVICE_PORT", 9002);
-static const string FileMetaServiceHost = get_env_or_default("FILEMETA_SERVICE_HOST", "127.0.0.1");
-static const unsigned short FileMetaServicePort = get_env_port("FILEMETA_SERVICE_PORT", 9003);
 
 /*
     统一返回 JSON。
@@ -482,15 +399,38 @@ static string encode_rfc5987_filename(const string& filename)
 */
 static void verify_token_async(const string& token,
                                HttpResp* resp,
-                               pb::AuthService::SRPCClient& auth_client,
+                               ServiceDiscovery& discovery,
                                const function<void(pb::UserIdentity)>& next)
 {
+    /*
+        第五期开始，网关不再直接持有固定地址的 AuthService client。
+
+        每次校验 token 前，先按服务名 AuthService 从注册中心选择一个健康实例。
+    */
+    ServiceEndpoint endpoint;
+    if (!discovery.select("AuthService", endpoint)) {
+        response_error(resp, HttpStatusInternalServerError, "内部服务器错误");
+        return;
+    }
+
+    /*
+        按发现到的 host/port 创建本次 RPC 调用使用的客户端。
+
+        使用 shared_ptr 的原因：
+        - srpc task 是异步执行的；
+        - 回调执行前，当前函数早已返回；
+        - 把 client 捕获进回调，可以保证 task 生命周期内 client 不会提前析构。
+    */
+    auto auth_client = make_shared<pb::AuthService::SRPCClient>(
+        endpoint.host.c_str(),
+        endpoint.port);
+
     /*
         创建 VerifyToken RPC task。
         这个 task 启动后会异步访问 AuthService。
     */
-    srpc::SRPCClientTask* task = auth_client.create_VerifyToken_task(
-        [resp, next](pb::VerifyTokenResponse* rpc_resp, srpc::RPCContext* ctx) {
+    srpc::SRPCClientTask* task = auth_client->create_VerifyToken_task(
+        [auth_client, resp, next](pb::VerifyTokenResponse* rpc_resp, srpc::RPCContext* ctx) {
             /*
                 先判断 RPC 通信层是否成功。
             */
@@ -552,7 +492,7 @@ static void verify_token_async(const string& token,
 */
 static void verify_request_async(const HttpReq* req,
                                  HttpResp* resp,
-                                 pb::AuthService::SRPCClient& auth_client,
+                                 ServiceDiscovery& discovery,
                                  const function<void(pb::UserIdentity)>& next)
 {
     /*
@@ -571,14 +511,12 @@ static void verify_request_async(const HttpReq* req,
     /*
         token 字符串已经拷贝出来，后续异步回调不再依赖 HttpReq 生命周期。
     */
-    verify_token_async(token, resp, auth_client, next);
+    verify_token_async(token, resp, discovery, next);
 }
 
 CloudDiskServer::CloudDiskServer()
     : oss_uploader_()
-    , auth_client_(AuthServiceHost.c_str(), AuthServicePort)
-    , user_client_(UserServiceHost.c_str(), UserServicePort)
-    , filemeta_client_(FileMetaServiceHost.c_str(), FileMetaServicePort)
+    , discovery_()
 {
     /*
         第四期开始，API Gateway 不再启动 RabbitMQ 消费线程。
@@ -589,6 +527,9 @@ CloudDiskServer::CloudDiskServer()
         - 发布 RabbitMQ 上传任务
 
         真正消费 RabbitMQ 并上传 OSS 的工作，交给独立 oss_upload_worker 进程。
+
+        第五期开始，API Gateway 不再在构造函数中固定连接三个后端服务。
+        真正调用 RPC 前，会通过 Consul 发现健康实例。
     */
 }
 
@@ -675,10 +616,29 @@ void CloudDiskServer::register_auth_module()
         }
 
         /*
+            第五期开始，注册请求先发现 AuthService 健康实例。
+        */
+        ServiceEndpoint endpoint;
+        if (!discovery_.select("AuthService", endpoint)) {
+            response_error(resp, HttpStatusInternalServerError, "内部服务器错误");
+            return;
+        }
+
+        /*
+            为本次 Register RPC 创建客户端。
+
+            这里不用类成员长期保存 client，是为了让下一次请求可以重新走服务发现，
+            从而感知 Consul 中实例的变化。
+        */
+        auto auth_client = make_shared<pb::AuthService::SRPCClient>(
+            endpoint.host.c_str(),
+            endpoint.port);
+
+        /*
             创建 Register RPC task。
         */
-        srpc::SRPCClientTask* task = auth_client_.create_Register_task(
-            [resp](pb::RegisterResponse* rpc_resp, srpc::RPCContext* ctx) {
+        srpc::SRPCClientTask* task = auth_client->create_Register_task(
+            [auth_client, resp](pb::RegisterResponse* rpc_resp, srpc::RPCContext* ctx) {
                 /*
                     先检查 RPC 通信是否成功。
                 */
@@ -760,10 +720,26 @@ void CloudDiskServer::register_auth_module()
         }
 
         /*
+            登录请求同样先通过注册中心发现 AuthService。
+        */
+        ServiceEndpoint endpoint;
+        if (!discovery_.select("AuthService", endpoint)) {
+            response_error(resp, HttpStatusInternalServerError, "内部服务器错误");
+            return;
+        }
+
+        /*
+            创建本次 Login RPC 调用使用的客户端。
+        */
+        auto auth_client = make_shared<pb::AuthService::SRPCClient>(
+            endpoint.host.c_str(),
+            endpoint.port);
+
+        /*
             创建 Login RPC task。
         */
-        srpc::SRPCClientTask* task = auth_client_.create_Login_task(
-            [resp](pb::LoginResponse* rpc_resp, srpc::RPCContext* ctx) {
+        srpc::SRPCClientTask* task = auth_client->create_Login_task(
+            [auth_client, resp](pb::LoginResponse* rpc_resp, srpc::RPCContext* ctx) {
                 /*
                     检查通信层。
                 */
@@ -829,12 +805,28 @@ void CloudDiskServer::register_user_module()
         /*
             先通过 AuthService 校验 token。
         */
-        verify_request_async(req, resp, auth_client_, [this, resp](pb::UserIdentity identity) {
+        verify_request_async(req, resp, discovery_, [this, resp](pb::UserIdentity identity) {
+            /*
+                token 有效后，通过注册中心发现 UserService。
+            */
+            ServiceEndpoint endpoint;
+            if (!discovery_.select("UserService", endpoint)) {
+                response_error(resp, HttpStatusInternalServerError, "内部服务器错误");
+                return;
+            }
+
+            /*
+                创建本次 GetUserProfile RPC 调用使用的客户端。
+            */
+            auto user_client = make_shared<pb::UserService::SRPCClient>(
+                endpoint.host.c_str(),
+                endpoint.port);
+
             /*
                 token 有效后，再调用 UserService 查询用户资料。
             */
-            srpc::SRPCClientTask* task = user_client_.create_GetUserProfile_task(
-                [resp](pb::GetUserProfileResponse* rpc_resp, srpc::RPCContext* ctx) {
+            srpc::SRPCClientTask* task = user_client->create_GetUserProfile_task(
+                [user_client, resp](pb::GetUserProfileResponse* rpc_resp, srpc::RPCContext* ctx) {
                     /*
                         检查 RPC 通信层。
                     */
@@ -895,12 +887,28 @@ void CloudDiskServer::register_file_module()
         /*
             文件列表需要先校验 token。
         */
-        verify_request_async(req, resp, auth_client_, [this, resp](pb::UserIdentity identity) {
+        verify_request_async(req, resp, discovery_, [this, resp](pb::UserIdentity identity) {
+            /*
+                token 有效后，通过注册中心发现 FileMetaService。
+            */
+            ServiceEndpoint endpoint;
+            if (!discovery_.select("FileMetaService", endpoint)) {
+                response_error(resp, HttpStatusInternalServerError, "内部服务器错误");
+                return;
+            }
+
+            /*
+                创建本次 ListFiles RPC 调用使用的客户端。
+            */
+            auto filemeta_client = make_shared<pb::FileMetaService::SRPCClient>(
+                endpoint.host.c_str(),
+                endpoint.port);
+
             /*
                 创建 ListFiles RPC task。
             */
-            srpc::SRPCClientTask* task = filemeta_client_.create_ListFiles_task(
-                [resp](pb::ListFilesResponse* rpc_resp, srpc::RPCContext* ctx) {
+            srpc::SRPCClientTask* task = filemeta_client->create_ListFiles_task(
+                [filemeta_client, resp](pb::ListFilesResponse* rpc_resp, srpc::RPCContext* ctx) {
                     /*
                         检查 RPC 通信层。
                     */
@@ -1026,7 +1034,7 @@ void CloudDiskServer::register_file_module()
         */
         verify_token_async(token,
                            resp,
-                           auth_client_,
+                           discovery_,
                            [this, resp, filename, content = move(content), hashcode](pb::UserIdentity identity) {
             /*
                 保存临时文件路径。
@@ -1043,10 +1051,27 @@ void CloudDiskServer::register_file_module()
             }
 
             /*
+                文件元数据写入前，先通过注册中心发现 FileMetaService。
+            */
+            ServiceEndpoint endpoint;
+            if (!discovery_.select("FileMetaService", endpoint)) {
+                oss_uploader_.remove_temp_file(temp_path);
+                response_error(resp, HttpStatusInternalServerError, "内部服务器错误");
+                return;
+            }
+
+            /*
+                创建本次 CreateFile RPC 调用使用的客户端。
+            */
+            auto filemeta_client = make_shared<pb::FileMetaService::SRPCClient>(
+                endpoint.host.c_str(),
+                endpoint.port);
+
+            /*
                 创建文件元数据 RPC task。
             */
-            srpc::SRPCClientTask* task = filemeta_client_.create_CreateFile_task(
-                [this, resp, uid = identity.user_id(), filename, hashcode, temp_path, file_size = content.size()](
+            srpc::SRPCClientTask* task = filemeta_client->create_CreateFile_task(
+                [filemeta_client, this, resp, uid = identity.user_id(), filename, hashcode, temp_path, file_size = content.size()](
                     pb::CreateFileResponse* rpc_resp,
                     srpc::RPCContext* ctx) {
                     /*
@@ -1135,12 +1160,28 @@ void CloudDiskServer::register_file_module()
         /*
             校验 token。
         */
-        verify_request_async(req, resp, auth_client_, [this, resp, file_id](pb::UserIdentity identity) {
+        verify_request_async(req, resp, discovery_, [this, resp, file_id](pb::UserIdentity identity) {
+            /*
+                token 有效后，通过注册中心发现 FileMetaService。
+            */
+            ServiceEndpoint endpoint;
+            if (!discovery_.select("FileMetaService", endpoint)) {
+                response_error(resp, HttpStatusInternalServerError, "内部服务器错误");
+                return;
+            }
+
+            /*
+                创建本次 GetFileForDownload RPC 调用使用的客户端。
+            */
+            auto filemeta_client = make_shared<pb::FileMetaService::SRPCClient>(
+                endpoint.host.c_str(),
+                endpoint.port);
+
             /*
                 创建下载元数据查询 RPC task。
             */
-            srpc::SRPCClientTask* task = filemeta_client_.create_GetFileForDownload_task(
-                [this, resp, uid = identity.user_id()](
+            srpc::SRPCClientTask* task = filemeta_client->create_GetFileForDownload_task(
+                [filemeta_client, this, resp, uid = identity.user_id()](
                     pb::GetFileForDownloadResponse* rpc_resp,
                     srpc::RPCContext* ctx) {
                     /*

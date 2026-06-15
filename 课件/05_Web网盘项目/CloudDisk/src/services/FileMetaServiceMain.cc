@@ -1,4 +1,5 @@
 #include "../common/ServiceCommon.h"
+#include "../common/ServiceRegistry.h"
 #include "../../rpc_gen/cloud_disk.srpc.h"
 
 #include <csignal>
@@ -384,6 +385,13 @@ int main()
     unsigned short port = get_env_port("FILEMETA_SERVICE_PORT", 9003);
 
     /*
+        读取注册到 Consul 时使用的服务地址。
+
+        默认 127.0.0.1 适合所有进程都跑在本机的学习环境。
+    */
+    string service_host = get_service_registry_host();
+
+    /*
         创建 srpc server。
     */
     srpc::SRPCServer server;
@@ -405,9 +413,32 @@ int main()
         cout << "[FileMetaService] listening on " << port << endl;
 
         /*
+            FileMetaService 启动成功后注册到 Consul。
+
+            API Gateway 查询文件列表、创建文件元数据、下载前查元数据时，
+            都会按 FileMetaService 这个服务名发现健康实例。
+        */
+        ServiceRegistrar registrar("FileMetaService", service_host, port);
+
+        /*
+            如果 Consul 是必需依赖且注册失败，当前服务启动失败。
+            如果不是必需依赖，registrar.start() 会允许服务继续运行。
+        */
+        if (!registrar.start()) {
+            server.stop();
+            google::protobuf::ShutdownProtobufLibrary();
+            return 1;
+        }
+
+        /*
             等待 Ctrl+C。
         */
         wait_group.wait();
+
+        /*
+            退出前停止 Consul TTL 心跳，并注销当前服务实例。
+        */
+        registrar.stop();
 
         /*
             停止服务。

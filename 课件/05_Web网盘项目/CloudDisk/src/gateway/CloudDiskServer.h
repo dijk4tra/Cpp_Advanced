@@ -1,6 +1,7 @@
 #pragma once
 #include "../../rpc_gen/cloud_disk.srpc.h"
 #include "../common/RabbitMqOssUploader.h"
+#include "../common/ServiceRegistry.h"
 
 #include <wfrest/HttpServer.h>
 #include <workflow/WFFacilities.h>
@@ -58,15 +59,10 @@ private:
     // 网关只有下载接口需要 OSS；下载时在局部创建 OssStorage 即可。
     RabbitMqOssUploader oss_uploader_;
 
-    // AuthService 的 srpc 客户端。
-    // 网关通过它调用 Register/Login/VerifyToken。
-    cloud::disk::AuthService::SRPCClient auth_client_;
-
-    // UserService 的 srpc 客户端。
-    // 网关通过它调用 GetUserProfile。
-    cloud::disk::UserService::SRPCClient user_client_;
-
-    // FileMetaService 的 srpc 客户端。
-    // 网关通过它调用 ListFiles/CreateFile/GetFileForDownload。
-    cloud::disk::FileMetaService::SRPCClient filemeta_client_;
+    // 服务发现器。
+    //
+    // 第五期开始，API Gateway 不再长期保存固定地址的 srpc client。
+    // 每次需要调用后端服务时，先通过 ServiceDiscovery 按服务名查一个健康实例，
+    // 再用查到的 host/port 创建本次 RPC 调用需要的 client。
+    ServiceDiscovery discovery_;
 };
