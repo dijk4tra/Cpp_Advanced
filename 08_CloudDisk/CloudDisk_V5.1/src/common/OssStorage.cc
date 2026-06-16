@@ -13,6 +13,8 @@ namespace oss = AlibabaCloud::OSS;
 
 /*
     读取必需环境变量。
+
+    OSS 的 AccessKey、Bucket、Endpoint 不适合写死在代码里，所以从 .env 导出的环境变量中读取。
     如果缺少任意一项，直接抛异常，让程序启动失败并明确告诉我们缺哪个变量。
 */
 static string getEnvOrThrow(const char* name)
@@ -24,7 +26,12 @@ static string getEnvOrThrow(const char* name)
     return string(value);
 }
 
-// OSS 连接配置
+/*
+    OSS 连接配置。
+
+    这些 static const string 在程序启动时初始化一次。
+    它们的值来自 run.sh 加载的 .env 文件。
+*/
 static const string OssEndpoint = getEnvOrThrow("ALIBABA_CLOUD_OSS_ENDPOINT");
 static const string OssAccessKeyId = getEnvOrThrow("ALIBABA_CLOUD_ACCESS_KEY_ID");
 static const string OssAccessKeySecret = getEnvOrThrow("ALIBABA_CLOUD_ACCESS_KEY_SECRET");
@@ -37,6 +44,7 @@ static const string OssRegion = getEnvOrThrow("ALIBABA_CLOUD_OSS_REGION");
     每次上传/下载都创建一个临时 OssClient：
     - 代码简单，生命周期清楚
     - 不需要确认 OssClient 是否能被多线程安全共享
+    - 当前是学习项目，请求量不大，这个成本可以接受
 */
 static unique_ptr<oss::OssClient> create_oss_client()
 {
@@ -52,7 +60,11 @@ static unique_ptr<oss::OssClient> create_oss_client()
         OssAccessKeySecret,
         conf);
 
-    client->SetRegion(OssRegion); // endpoint 和 region 要匹配
+    /*
+        SetRegion 告诉 SDK 当前 Bucket 所在地域。
+        endpoint 和 region 要匹配，否则 OSS 可能返回签名或地域相关错误。
+    */
+    client->SetRegion(OssRegion);
     return client;
 }
 
@@ -84,7 +96,7 @@ OssStorage::~OssStorage()
 {
     /*
         ShutdownSdk() 释放 OSS SDK 内部的全局资源。
-        RabbitMqOssUploader 停止后台线程后，OssStorage 才会析构。
+        RabbitMqOssUploader 停止后台线程后，OssStorage 才会析构，因此不会一边释放 SDK 一边上传文件。
     */
     oss::ShutdownSdk();
 }
@@ -112,6 +124,7 @@ bool OssStorage::upload_object(int uid, const string& hashcode, const string& co
     */
     auto stream = make_shared<stringstream>(ios::in | ios::out | ios::binary);
     stream->write(content.data(), content.size());
+
     /*
         write() 写完后，流的位置在末尾。
         seekg(0) 把读取位置移动回开头，否则 SDK 可能读不到完整内容。

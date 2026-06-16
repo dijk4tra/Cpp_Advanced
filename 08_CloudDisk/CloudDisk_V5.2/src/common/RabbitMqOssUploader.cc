@@ -15,6 +15,12 @@ using json = nlohmann::json;
 namespace amqp = AmqpClient;
 namespace fs = std::filesystem;
 
+/*
+    读取可选环境变量。
+
+    RabbitMQ 本地开发常用 guest/guest，所以这里提供默认值。
+    如果实际部署的用户名、密码、端口不同，可以在 .env 中覆盖。
+*/
 static string getEnvOrDefault(const char* name, const string& default_value)
 {
     const char* value = getenv(name);
@@ -24,7 +30,14 @@ static string getEnvOrDefault(const char* name, const string& default_value)
     return string(value);
 }
 
-// RabbitMQ 连接和路由配置
+/*
+    RabbitMQ 连接和路由配置。
+
+    这组名字和 PDF 示例保持一致：
+    - exchange：oss.direct
+    - queue：oss.queue
+    - routing key：oss
+*/
 static const string RabbitMqUri = getEnvOrDefault("RABBITMQ_URI", "amqp://guest:guest@localhost:5672/%2f");
 static const string RabbitMqExchange = getEnvOrDefault("RABBITMQ_EXCHANGE", "oss.direct");
 static const string RabbitMqQueue = getEnvOrDefault("RABBITMQ_QUEUE", "oss.queue");
@@ -33,12 +46,14 @@ static const string RabbitMqRoutingKey = getEnvOrDefault("RABBITMQ_ROUTING_KEY",
 /*
     本地临时文件目录。
 
+    第三期之前为了教学直观，RabbitMQ 消息体直接放文件内容。
+    现在改成更接近生产的方式：
     1. HTTP 上传接口先把文件内容写到本地临时文件
     2. RabbitMQ 消息只保存 tempPath
     3. 消费者按 tempPath 读取文件，再上传到 OSS
 
-    如果 .env 中没有配置 CLOUDDISK_TEMP_DIR，就默认写到 ./tmp/uploads
-    这个路径是相对 CloudDisk 程序运行目录的
+    如果 .env 中没有配置 CLOUDDISK_TEMP_DIR，就默认写到 ./tmp/uploads。
+    这个路径是相对 CloudDisk 程序运行目录的。
 */
 static const string TempUploadDir = getEnvOrDefault("CLOUDDISK_TEMP_DIR", "./tmp/uploads");
 
@@ -128,23 +143,23 @@ static void declare_rabbitmq_topology(const amqp::Channel::ptr_t& channel)
                           false,         // exclusive
                           false);        // auto_delete
 
-    // 绑定后，routing key 为 oss 的消息会进入 oss.queue
+    // 绑定后，routing key 为 oss 的消息会进入 oss.queue。
     channel->BindQueue(RabbitMqQueue, RabbitMqExchange, RabbitMqRoutingKey);
 }
 
 RabbitMqOssUploader::RabbitMqOssUploader()
     : oss_storage_(nullptr)
-    , stopping_(false)      // 设置停止标志为 false
+    , stopping_(false)          // 设置停止标志为 false
 {}
 
 RabbitMqOssUploader::RabbitMqOssUploader(OssStorage& oss_storage)
     : oss_storage_(&oss_storage)
-    , stopping_(false)      // 设置停止标志为 false
+    , stopping_(false)          // 设置停止标志为 false
 {}
 
 RabbitMqOssUploader::~RabbitMqOssUploader()
 {
-    // 析构时兜底停止线程，避免忘记手动调用 stop()
+    // 析构时兜底停止线程，避免忘记手动调用 stop()。
     stop();
 }
 
@@ -158,15 +173,13 @@ void RabbitMqOssUploader::start()
         return;
     }
 
-    // 启动前把停止标志重置为 false，表示允许 worker_loop 运行
-    stopping_ = false;
-    // 创建后台线程，执行当前对象的 worker_loop 成员函数
-    worker_ = thread(&RabbitMqOssUploader::worker_loop, this);
+    stopping_ = false; // 启动前把停止标志重置为 false，表示允许 worker_loop 运行
+    worker_ = thread(&RabbitMqOssUploader::worker_loop, this); // 创建后台线程，执行当前对象的 worker_loop 成员函数
 }
 
 void RabbitMqOssUploader::stop()
 {
-    // 通知后台线程退出循环
+    // 通知后台线程退出循环。
     stopping_ = true;
 
     /*
@@ -247,6 +260,7 @@ bool RabbitMqOssUploader::publish(int uid, const string& hashcode, const string&
         amqp::Channel::ptr_t channel = create_rabbitmq_channel();
         declare_rabbitmq_topology(channel);
 
+        json task;
         /*
             uid/hashcode 决定 OSS ObjectName：
                 users/{uid}/{hashcode}
@@ -254,7 +268,6 @@ bool RabbitMqOssUploader::publish(int uid, const string& hashcode, const string&
             tempPath 指向 HTTP 上传接口保存的本地临时文件。
             RabbitMQ 消息只传路径，不再携带真实文件内容。
         */
-        json task;
         task["uid"] = uid;
         task["hashcode"] = hashcode;
         task["tempPath"] = temp_path;
@@ -378,7 +391,7 @@ void RabbitMqOssUploader::worker_loop()
                     channel->BasicAck(envelope);
                     /*
                         OSS 上传成功后，临时文件已经没有用了。
-                        这里立即删除，避免本地磁盘占用过大。
+                        这里立即删除，避免本地磁盘越积越多。
                     */
                     remove_temp_file(temp_path);
                     cout << "[RabbitMQ consume OK] uid=" << uid << ", hashcode=" << hashcode << endl;

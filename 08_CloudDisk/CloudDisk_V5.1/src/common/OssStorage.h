@@ -2,7 +2,14 @@
 
 #include <string>
 
-// 下载接口需要区分对象不存在和 OSS 服务异常，以映射不同 HTTP 状态码。
+/*
+    OssDownloadStatus 表示“从 OSS 下载文件”这件事的结果。
+
+    为什么不用 bool？
+    - bool 只能表达成功/失败
+    - 下载接口需要区分“对象不存在”和“OSS 服务异常”
+    - 对象不存在要返回 404，服务异常要返回 500
+*/
 enum class OssDownloadStatus {
     Ok,
     NotFound,
@@ -19,6 +26,7 @@ enum class OssDownloadStatus {
     - 下载文件内容
 
     它不关心 HTTP 请求、MySQL、RabbitMQ。
+    这样 CloudDiskServer.cc 就不需要混入 OSS SDK 的大量细节。
 */
 class OssStorage {
 public:

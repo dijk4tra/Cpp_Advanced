@@ -8,14 +8,19 @@
 /*
     ServiceEndpoint 表示一个可以被 srpc 客户端连接的服务实例地址。
 
-    注册中心的功能：
+    注册中心最终解决的问题很简单：
     - 服务提供者告诉 Consul：“我这个服务实例在 host:port 上”；
     - 服务消费者从 Consul 查出：“我要调用的服务现在有哪些健康的 host:port”。
 
     所以这里先用一个最小结构保存 host 和 port。
 */
 struct ServiceEndpoint {
-    // host 是服务实例对外暴露的 IP 或域名。
+    /*
+        host 是服务实例对外暴露的 IP 或域名。
+
+        本课程项目默认所有进程都在本机运行，所以通常是 127.0.0.1。
+        如果以后服务跑到不同机器，就应该设置成其它机器可以访问到的内网 IP。
+    */
     std::string host;
 
     /*
@@ -71,22 +76,20 @@ public:
     */
     bool start();
 
-    /*
-        停止心跳并注销服务。
-        正常 Ctrl+C 退出时，main() 会显式调用它。
-    */
+    // 停止心跳并注销服务。正常 Ctrl+C 退出时，main() 会显式调用它。
     void stop();
 
 private:
     /*
         心跳线程入口。
+
         Consul TTL 检查要求服务定期调用 servicePass(service_id)，
         否则超过 TTL 后实例会被标记成 critical。
     */
     void heartbeat_loop();
 
 private:
-    // 服务名，例如 AuthService
+    // 服务名，例如 AuthService。
     std::string service_name_;
 
     /*
@@ -95,19 +98,20 @@ private:
     */
     std::string service_id_;
 
-    // 当前实例对外暴露的地址
+    // 当前实例对外暴露的地址。
     std::string host_;
 
-    // 当前实例监听的 srpc 端口
+    // 当前实例监听的 srpc 端口。
     unsigned short port_;
 
     /*
         表示是否已经成功注册到 Consul。
+
         只有注册成功后，stop() 才需要注销服务。
     */
     bool registered_;
 
-    // 心跳线程是否需要退出
+    // 心跳线程是否需要退出。
     bool stopping_;
 
     /*
@@ -116,7 +120,7 @@ private:
     */
     std::mutex mutex_;
 
-    // 后台心跳线程
+    // 后台心跳线程。
     std::thread heartbeat_thread_;
 };
 
@@ -164,8 +168,6 @@ private:
     std::mutex mutex_;
 };
 
-/*
-    读取当前服务注册到 Consul 时使用的 host。
-    单独暴露这个函数，是为了三个服务 main.cc 可以少写重复 getenv 代码。
-*/
+// 读取当前服务注册到 Consul 时使用的 host。
+// 单独暴露这个函数，是为了三个服务的 Main.cc 可以少写重复 getenv 代码。
 std::string get_service_registry_host();

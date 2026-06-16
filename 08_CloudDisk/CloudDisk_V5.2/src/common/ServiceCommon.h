@@ -6,18 +6,54 @@
 #include <string>
 #include <workflow/MySQLResult.h>
 
-// 微服务端共用配置和工具。
+/*
+    ServiceCommon.h 放微服务端共用的小工具。
+
+    本项目是学习项目，所以这里没有做复杂的数据库连接池、
+    配置中心、日志框架，只保留第四期改造真正需要的公共能力。
+*/
+
+/*
+    数据库连接 URL。
+
+    第三期代码直接在 CloudDiskServer.cc 中写死这个 URL。
+    第四期拆成多个服务后，AuthService/UserService/FileMetaService
+    都要访问同一个学习用 MySQL 数据库，所以把 URL 放到公共头文件中。
+*/
 extern const std::string DatabaseURL;
+
+/*
+    Workflow MySQL 任务的最大重试次数。
+
+    保持和第三期 CloudDiskServer.cc 中的 RetryMax=3 一致。
+*/
 extern const int RetryMax;
 
-// 从环境变量读取端口；缺失或非法时返回默认端口。
+/*
+    从环境变量读取端口。
+
+    参数说明：
+    - name：环境变量名，例如 "AUTH_SERVICE_PORT"。
+    - default_port：环境变量不存在时使用的默认端口。
+
+    返回值：
+    - 如果环境变量存在且是合法数字，返回环境变量中的端口。
+    - 否则返回 default_port。
+*/
 unsigned short get_env_port(const char* name, unsigned short default_port);
 
-// 简单转义拼接 SQL 时会破坏字符串字面量的字符；正式项目应改用参数化 SQL。
+/*
+    简单处理 SQL 字符串中的单引号和反斜线。
+
+    这个函数来自第三期 CloudDiskServer.cc。
+    正式项目应该使用参数化 SQL；当前课程项目为了降低学习成本，
+    继续使用字符串拼接 SQL，所以至少要处理这两个最容易破坏 SQL 字符串的字符。
+*/
 std::string escape_sql(const std::string& s);
 
 /*
     给 protobuf 响应中的 CommonResult 赋值。
+
     所有 RPC 响应都带 result 字段，因此用这个小函数统一写入 code/message。
 */
 void set_result(cloud::disk::CommonResult* result, int code, const std::string& message);

@@ -6,6 +6,17 @@
 #include <wfrest/HttpServer.h>
 #include <workflow/WFFacilities.h>
 
+// 面向对象：将专业的事情交给专业的“人”去做
+// 设计原则：武学心法
+// 设计模式：招数
+
+// 设计原则：组合优于继承
+//     组合：有选择的复用代码
+//     继承：会复用基类的所有代码，代码复用的技术！
+
+// 装饰器模式（Wrapper）: 组合
+//     保持接口一致，可以降低用户的学习成本
+
 class CloudDiskServer {
 public:
     CloudDiskServer();
@@ -32,7 +43,9 @@ private:
     void register_file_module();
 
 private:
-    wfrest::HttpServer server_;
+    // 名字中最好不要带具体的实现细节
+    // 方便以后修改具体的实现
+    wfrest::HttpServer server_; // 组合
 
     // RabbitMqOssUploader 在网关进程中只负责：
     // 1. 保存上传临时文件

@@ -63,7 +63,6 @@ public:
 
     /*
         析构函数里会调用 stop()。
-
         这样即使 main() 中忘记手动 stop，也会尽量停止心跳线程并注销服务。
     */
     ~ServiceRegistrar();
@@ -77,11 +76,7 @@ public:
     */
     bool start();
 
-    /*
-        停止心跳并注销服务。
-
-        正常 Ctrl+C 退出时，main() 会显式调用它。
-    */
+    // 停止心跳并注销服务。正常 Ctrl+C 退出时，main() 会显式调用它。
     void stop();
 
 private:
@@ -94,26 +89,19 @@ private:
     void heartbeat_loop();
 
 private:
-    /*
-        服务名，例如 AuthService。
-    */
+    // 服务名，例如 AuthService。
     std::string service_name_;
 
     /*
         实例 ID，例如 AuthService-127.0.0.1-9001。
-
         Consul 允许同一个服务名下有多个实例，但每个实例 ID 必须唯一。
     */
     std::string service_id_;
 
-    /*
-        当前实例对外暴露的地址。
-    */
+    // 当前实例对外暴露的地址。
     std::string host_;
 
-    /*
-        当前实例监听的 srpc 端口。
-    */
+    // 当前实例监听的 srpc 端口。
     unsigned short port_;
 
     /*
@@ -123,21 +111,16 @@ private:
     */
     bool registered_;
 
-    /*
-        心跳线程是否需要退出。
-    */
+    // 心跳线程是否需要退出。
     bool stopping_;
 
     /*
         保护 stopping_ 和 registered_。
-
         心跳线程和主线程都会访问这两个变量，所以用一个简单互斥锁。
     */
     std::mutex mutex_;
 
-    /*
-        后台心跳线程。
-    */
+    // 后台心跳线程。
     std::thread heartbeat_thread_;
 };
 
@@ -185,9 +168,6 @@ private:
     std::mutex mutex_;
 };
 
-/*
-    读取当前服务注册到 Consul 时使用的 host。
-
-    单独暴露这个函数，是为了三个服务 main.cc 可以少写重复 getenv 代码。
-*/
+// 读取当前服务注册到 Consul 时使用的 host。
+// 单独暴露这个函数，是为了三个服务的 Main.cc 可以少写重复 getenv 代码。
 std::string get_service_registry_host();

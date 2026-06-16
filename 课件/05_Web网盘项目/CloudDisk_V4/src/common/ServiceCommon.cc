@@ -9,17 +9,10 @@
 using namespace std;
 using namespace protocol;
 
-/*
-    这里继续使用第三期学习项目中的 MySQL 地址。
-
-    第四期的重点是微服务拆分和 RPC 调用，所以不额外引入配置文件解析。
-    后续如果要部署到不同机器，可以再把这个值改成环境变量。
-*/
+// MySQL 地址
 const string DatabaseURL = "mysql://root:123456@localhost/CloudDisk";
 
-/*
-    MySQL 查询失败时最多重试 3 次。
-*/
+// MySQL 查询失败时最多重试 3 次。
 const int RetryMax = 3;
 
 unsigned short get_env_port(const char* name, unsigned short default_port)
@@ -30,9 +23,7 @@ unsigned short get_env_port(const char* name, unsigned short default_port)
     */
     const char* value = getenv(name);
 
-    /*
-        环境变量不存在或为空字符串时，直接使用默认端口。
-    */
+    // 环境变量不存在或为空字符串时，直接使用默认端口。
     if (value == nullptr || string(value).empty()) {
         return default_port;
     }
@@ -52,9 +43,7 @@ unsigned short get_env_port(const char* name, unsigned short default_port)
         return default_port;
     }
 
-    /*
-        前面已经确认范围合法，这里可以安全转成 unsigned short。
-    */
+    // 前面已经确认范围合法，这里可以安全转成 unsigned short。
     return static_cast<unsigned short>(port);
 }
 
@@ -67,10 +56,7 @@ string escape_sql(const string& s)
     string result;
     result.reserve(s.size());
 
-    /*
-        逐字符扫描输入字符串。
-        本学习项目只处理单引号和反斜线两个最常见问题字符。
-    */
+    // 逐字符扫描输入字符串。只处理单引号和反斜线两个最常见问题字符。
     for (char ch : s) {
         /*
             SQL 字符串用单引号包起来。
@@ -84,17 +70,13 @@ string escape_sql(const string& s)
         */
         } else if (ch == '\\') {
             result += "\\\\";
-        /*
-            普通字符直接追加。
-        */
+        // 普通字符直接追加。
         } else {
             result += ch;
         }
     }
 
-    /*
-        返回已经适合拼接进 SQL 单引号字符串的内容。
-    */
+    // 返回已经适合拼接进 SQL 单引号字符串的内容。
     return result;
 }
 
@@ -106,9 +88,7 @@ void set_result(cloud::disk::CommonResult* result, int code, const string& messa
     */
     result->set_code(code);
 
-    /*
-        message 是给 API Gateway 转成 HTTP JSON 后返回给前端看的文本。
-    */
+    // message 是给 API Gateway 转成 HTTP JSON 后返回给前端看的文本。
     result->set_message(message);
 }
 
@@ -117,7 +97,7 @@ bool run_mysql_query(const string& sql,
 {
     /*
         ok 表示这次 MySQL 任务是否成功走到了业务处理阶段。
-        默认 false，只有网络层和 MySQL 返回包都正常时才改成 true。
+        默认 false，只有网络层 and MySQL 返回包都正常时才改成 true。
     */
     bool ok = false;
 
@@ -178,15 +158,11 @@ bool run_mysql_query(const string& sql,
             */
             handler(cursor);
 
-            /*
-                handler 能执行到这里，说明网络层和 MySQL 返回包都没有失败。
-            */
+            // handler 能执行到这里，说明网络层和 MySQL 返回包都没有失败。
             ok = true;
         });
 
-    /*
-        把 SQL 写入 MySQL 请求。
-    */
+    // 把 SQL 写入 MySQL 请求。
     task->get_req()->set_query(sql);
 
     /*
@@ -199,9 +175,7 @@ bool run_mysql_query(const string& sql,
             wait_group.done();
         });
 
-    /*
-        启动异步任务。
-    */
+    // 启动异步任务。
     series->start();
 
     /*
@@ -210,8 +184,6 @@ bool run_mysql_query(const string& sql,
     */
     wait_group.wait();
 
-    /*
-        返回这次 SQL 是否顺利执行到 handler。
-    */
+    // 返回这次 SQL 是否顺利执行到 handler。
     return ok;
 }

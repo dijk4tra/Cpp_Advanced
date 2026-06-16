@@ -36,90 +36,64 @@ public:
                   cloud::disk::RegisterResponse* response,
                   srpc::RPCContext*) override
     {
-        /*
-            先从 protobuf 请求中取出用户名和密码。
-            protobuf 的 string 字段默认是空字符串，所以没有字段时也会得到 ""。
-        */
+        // 先从 protobuf 请求中取出用户名和密码。
+        // protobuf 的 string 字段默认是空字符串，所以没有字段时也会得到 ""。
         string username = request->username();
         string password = request->password();
 
-        /*
-            服务端仍然做一次基础校验。
-            即使网关已经校验过，微服务也不应该完全相信调用方。
-        */
+        // 服务端仍然做一次基础校验。
+        // 即使网关已经校验过，微服务也不应该完全相信调用方。
         if (username.empty() || password.empty()) {
             set_result(response->mutable_result(), 400, "用户名和密码不能为空");
             return;
         }
 
-        /*
-            生成随机 salt。
-            salt 会和密码一起参与哈希，避免相同密码在数据库中得到相同哈希。
-        */
+        // 生成随机 salt。
+        // salt 会和密码一起参与哈希，避免相同密码在数据库中得到相同哈希。
         string salt = CryptoUtil::generate_salt();
 
-        /*
-            计算密码哈希。
-            数据库中保存 password_hash，不保存明文 password。
-        */
+        // 计算密码哈希。
+        // 数据库中保存 password_hash，不保存明文 password。
         string password_hash = CryptoUtil::hash_password(password, salt);
 
-        /*
-            拼接插入用户的 SQL。
-            escape_sql() 处理用户名、哈希值、salt 中可能出现的特殊字符。
-        */
+        // 拼接插入用户的 SQL。
+        // escape_sql() 处理用户名、哈希值、salt 中可能出现的特殊字符。
         string sql =
             "INSERT INTO tbl_user (username, password, salt) VALUES ('" +
             escape_sql(username) + "', '" +
             escape_sql(password_hash) + "', '" +
             escape_sql(salt) + "');";
 
-        /*
-            insert_id 用来保存 MySQL 自动生成的用户 id。
-            先初始化为 0，只有 INSERT 成功后才会被赋值。
-        */
+        // insert_id 用来保存 MySQL 自动生成的用户 id。
+        // 先初始化为 0，只有 INSERT 成功后才会被赋值。
         int insert_id = 0;
 
-        /*
-            cursor_status 用来保存 MySQLResultCursor 的状态。
-            INSERT 成功时应该是 MYSQL_STATUS_OK。
-        */
+        // cursor_status 用来保存 MySQLResultCursor 的状态。
+        // INSERT 成功时应该是 MYSQL_STATUS_OK。
         int cursor_status = MYSQL_STATUS_ERROR;
 
-        /*
-            执行 SQL。
-            run_mysql_query 会等待 MySQL 任务完成，然后在 handler 中读取结果。
-        */
+        // 执行 SQL。
+        // run_mysql_query 会等待 MySQL 任务完成，然后在 handler 中读取结果。
         bool query_ok = run_mysql_query(sql, [&](MySQLResultCursor& cursor) {
-            /*
-                记录 cursor 状态，方便回调外判断 INSERT 是否成功。
-            */
+            // 记录 cursor 状态，方便回调外判断 INSERT 是否成功。
             cursor_status = cursor.get_cursor_status();
 
-            /*
-                get_insert_id() 返回 MySQL 为 AUTO_INCREMENT 字段生成的 id。
-            */
+            // get_insert_id() 返回 MySQL 为 AUTO_INCREMENT 字段生成的 id。
             insert_id = static_cast<int>(cursor.get_insert_id());
         });
 
-        /*
-            query_ok=false 通常表示网络错误或 MySQL 返回错误包。
-            在注册接口里最常见的业务原因是用户名唯一键冲突。
-        */
+        // query_ok=false 通常表示网络错误或 MySQL 返回错误包。
+        // 在注册接口里最常见的业务原因是用户名唯一键冲突。
         if (!query_ok || cursor_status != MYSQL_STATUS_OK) {
             set_result(response->mutable_result(), 409, "用户名已存在");
             return;
         }
 
-        /*
-            走到这里说明注册成功。
-            code=0 表示业务成功，HTTP 状态码由网关决定。
-        */
+        // 走到这里说明注册成功。
+        // code=0 表示业务成功，HTTP 状态码由网关决定。
         set_result(response->mutable_result(), 0, "注册成功");
 
-        /*
-            把新用户 id 和用户名写入响应，网关会转成前端需要的 JSON。
-        */
+        // 把新用户 id 和用户名写入响应，网关会转成前端需要的 JSON。
         response->set_user_id(insert_id);
         response->set_username(username);
     }
@@ -136,79 +110,55 @@ public:
                cloud::disk::LoginResponse* response,
                srpc::RPCContext*) override
     {
-        /*
-            从请求中取出用户名和密码。
-        */
+        // 从请求中取出用户名和密码。
         string username = request->username();
         string password = request->password();
 
-        /*
-            基础参数校验。
-        */
+        // 基础参数校验。
         if (username.empty() || password.empty()) {
             set_result(response->mutable_result(), 400, "用户名和密码不能为空");
             return;
         }
 
-        /*
-            查询用户认证所需字段。
-            tomb=0 表示只允许未逻辑删除的用户登录。
-        */
+        // 查询用户认证所需字段。
+        // tomb=0 表示只允许未逻辑删除的用户登录。
         string sql =
             "SELECT id, username, password, salt, created_at "
             "FROM tbl_user "
             "WHERE username='" + escape_sql(username) + "' AND tomb=0 "
             "LIMIT 1;";
 
-        /*
-            found 表示 SELECT 是否查到了用户行。
-        */
+        // found 表示 SELECT 是否查到了用户行。
         bool found = false;
 
-        /*
-            db_error 表示 SELECT 本身是否失败。
-        */
+        // db_error 表示 SELECT 本身是否失败。
         bool db_error = false;
 
-        /*
-            user 用来保存从数据库读出的用户记录。
-            这里复用第三期 CryptoUtil.h 中的 User 结构。
-        */
+        // user 用来保存从数据库读出的用户记录。
+        // 这里复用第三期 CryptoUtil.h 中的 User 结构。
         User user;
 
-        /*
-            执行 SELECT。
-        */
+        // 执行 SELECT。
         bool query_ok = run_mysql_query(sql, [&](MySQLResultCursor& cursor) {
-            /*
-                SELECT 成功时 cursor 状态应该是 MYSQL_STATUS_GET_RESULT。
-            */
+            // SELECT 成功时 cursor 状态应该是 MYSQL_STATUS_GET_RESULT。
             if (cursor.get_cursor_status() != MYSQL_STATUS_GET_RESULT) {
                 db_error = true;
                 return;
             }
 
-            /*
-                row 保存当前读取到的一行数据。
-            */
+            // row 保存当前读取到的一行数据。
             vector<MySQLCell> row;
 
-            /*
-                fetch_row(row) 返回 false 表示结果集没有任何行。
-            */
+            // fetch_row(row) 返回 false 表示结果集没有任何行。
             if (!cursor.fetch_row(row)) {
                 found = false;
                 return;
             }
 
-            /*
-                走到这里说明查到了用户。
-            */
+            // 走到这里说明查到了用户。
             found = true;
 
-            /*
-                按 SELECT 字段顺序把 MySQLCell 转成 C++ 字段。
-            */
+            // 按 SELECT 字段顺序把 MySQLCell 转成 C++ 字段。
             user.id = row[0].as_int();
             user.username = row[1].as_string();
             user.password = row[2].as_string();
@@ -216,63 +166,43 @@ public:
             user.createdAt = row[4].as_string();
         });
 
-        /*
-            查询执行失败是服务端问题。
-        */
+        // 查询执行失败是服务端问题。
         if (!query_ok || db_error) {
             set_result(response->mutable_result(), 500, "内部服务器错误");
             return;
         }
 
-        /*
-            用户不存在时，不告诉前端是用户名不存在还是密码错误。
-        */
+        // 用户不存在时，不告诉前端是用户名不存在还是密码错误。
         if (!found) {
             set_result(response->mutable_result(), 401, "用户名或密码错误");
             return;
         }
 
-        /*
-            使用数据库中的 salt 对用户输入的 password 再算一次哈希。
-        */
+        // 使用数据库中的 salt 对用户输入的 password 再算一次哈希。
         string input_hash = CryptoUtil::hash_password(password, user.salt);
 
-        /*
-            哈希不同，说明密码错误。
-        */
+        // 哈希不同，说明密码错误。
         if (input_hash != user.password) {
             set_result(response->mutable_result(), 401, "用户名或密码错误");
             return;
         }
 
-        /*
-            密码正确，生成 JWT。
-        */
+        // 密码正确，生成 JWT。
         string token = CryptoUtil::generate_token(user);
 
-        /*
-            设置成功结果。
-        */
+        // 设置成功结果。
         set_result(response->mutable_result(), 0, "登录成功");
 
-        /*
-            写入 token 字符串。
-        */
+        // 写入 token 字符串。
         response->set_access_token(token);
 
-        /*
-            当前项目使用 Bearer Token。
-        */
+        // 当前项目使用 Bearer Token。
         response->set_token_type("Bearer");
 
-        /*
-            mutable_user() 返回响应中 user 子对象的可写指针。
-        */
+        // mutable_user() 返回响应中 user 子对象的可写指针。
         cloud::disk::UserIdentity* identity = response->mutable_user();
 
-        /*
-            把用户基础信息写入登录响应。
-        */
+        // 把用户基础信息写入登录响应。
         identity->set_user_id(user.id);
         identity->set_username(user.username);
         identity->set_created_at(user.createdAt);
@@ -288,36 +218,26 @@ public:
                      cloud::disk::VerifyTokenResponse* response,
                      srpc::RPCContext*) override
     {
-        /*
-            从请求中取出 token。
-        */
+        // 从请求中取出 token。
         string token = request->access_token();
 
-        /*
-            token 为空一定无效。
-        */
+        // token 为空一定无效。
         if (token.empty()) {
             set_result(response->mutable_result(), 401, "无效的访问令牌");
             return;
         }
 
-        /*
-            verify_token 会校验签名、主题、过期时间，并把用户信息写入 user。
-        */
+        // verify_token 会校验签名、主题、过期时间，并把用户信息写入 user。
         User user;
         if (!CryptoUtil::verify_token(token, user)) {
             set_result(response->mutable_result(), 401, "无效的访问令牌");
             return;
         }
 
-        /*
-            token 有效。
-        */
+        // token 有效。
         set_result(response->mutable_result(), 0, "Token 校验成功");
 
-        /*
-            把 token 中的用户身份返回给网关。
-        */
+        // 把 token 中的用户身份返回给网关。
         cloud::disk::UserIdentity* identity = response->mutable_user();
         identity->set_user_id(user.id);
         identity->set_username(user.username);
@@ -325,33 +245,23 @@ public:
     }
 };
 
-/*
-    服务进程退出等待器。
-    SIGINT 到来时 done()，main() 中的 wait() 才会返回。
-*/
+// 服务进程退出等待器。
+// SIGINT 到来时 done()，main() 中的 wait() 才会返回。
 static WFFacilities::WaitGroup wait_group(1);
 
-/*
-    Ctrl+C 时触发这个函数。
-*/
+// Ctrl+C 时触发这个函数。
 static void sig_handler(int)
 {
-    /*
-        通知 main() 可以停止 srpc server 并退出。
-    */
+    // 通知 main() 可以停止 srpc server 并退出。
     wait_group.done();
 }
 
 int main()
 {
-    /*
-        初始化 protobuf 运行库。
-    */
+    // 初始化 protobuf 运行库。
     GOOGLE_PROTOBUF_VERIFY_VERSION;
 
-    /*
-        注册 Ctrl+C 信号处理函数。
-    */
+    // 注册 Ctrl+C 信号处理函数。
     signal(SIGINT, sig_handler);
 
     /*
@@ -362,10 +272,8 @@ int main()
     */
     srand(time(nullptr));
 
-    /*
-        读取端口。
-        如果环境变量 AUTH_SERVICE_PORT 不存在，默认监听 9001。
-    */
+    // 读取端口。
+    // 如果环境变量 AUTH_SERVICE_PORT 不存在，默认监听 9001。
     unsigned short port = get_env_port("AUTH_SERVICE_PORT", 9001);
 
     /*
@@ -377,25 +285,17 @@ int main()
     */
     string service_host = get_service_registry_host();
 
-    /*
-        创建 srpc 服务器。
-    */
+    // 创建 srpc 服务器。
     srpc::SRPCServer server;
 
-    /*
-        创建认证服务实现对象。
-        这个对象必须比 server 运行时间更长，所以放在 main 栈上。
-    */
+    // 创建认证服务实现对象。
+    // 这个对象必须比 server 运行时间更长，所以放在 main 栈上。
     AuthServiceImpl service;
 
-    /*
-        把 AuthService 注册进 srpc server。
-    */
+    // 把 AuthService 注册进 srpc server。
     server.add_service(&service);
 
-    /*
-        启动监听。
-    */
+    // 启动监听。
     if (server.start(port) == 0) {
         cout << "[AuthService] listening on " << port << endl;
 
@@ -420,34 +320,22 @@ int main()
             return 1;
         }
 
-        /*
-            阻塞等待 Ctrl+C。
-        */
+        // 阻塞等待 Ctrl+C。
         wait_group.wait();
 
-        /*
-            退出前停止 TTL 心跳，并从 Consul 注销当前服务实例。
-        */
+        // 退出前停止 TTL 心跳，并从 Consul 注销当前服务实例。
         registrar.stop();
 
-        /*
-            收到退出信号后停止服务。
-        */
+        // 收到退出信号后停止服务。
         server.stop();
     } else {
-        /*
-            start() 非 0 表示监听失败，例如端口被占用。
-        */
+        // start() 非 0 表示监听失败，例如端口被占用。
         cerr << "[AuthService] start FAILED on port " << port << endl;
     }
 
-    /*
-        释放 protobuf 全局资源。
-    */
+    // 释放 protobuf 全局资源。
     google::protobuf::ShutdownProtobufLibrary();
 
-    /*
-        main 正常结束。
-    */
+    // main 正常结束。
     return 0;
 }

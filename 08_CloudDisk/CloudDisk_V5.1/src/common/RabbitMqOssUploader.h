@@ -27,60 +27,48 @@ public:
     */
     RabbitMqOssUploader();
 
-    // oss_upload_worker 传入 OssStorage 后可启动消费者线程执行上传。
-    /* 这个构造函数只接收一个参数（OssStorage&）。
-       在 C++ 中，如果一个构造函数可以只用一个参数调用，它默认会成为一个转换构造函数（Conversion Constructor）。
-
-       如果没有加 explicit，编译器会允许如下的隐式转换：
-            void do_something(RabbitMqOssUploader uploader);
-            OssStorage my_storage;
-            // 隐式转换：编译器会自动调用 RabbitMqOssUploader(my_storage) 创建一个临时对象
-            do_something(my_storage);
-
-        加了 explicit 之后：
-        上述隐式转换在编译时就会报错。必须显式地创建对象：
-            OssStorage my_storage;
-            // 必须这样显式调用
-            RabbitMqOssUploader uploader(my_storage);
-            do_something(uploader);
+    /*
+        传入 OssStorage&，表示 RabbitMqOssUploader 不拥有 OSS 存储对象。
+        它只是“借用”这个对象来执行上传。
+        这个构造函数给 oss_upload_worker 使用。
     */
     explicit RabbitMqOssUploader(OssStorage& oss_storage);
     ~RabbitMqOssUploader();
 
-    // 禁止拷贝，避免复制线程对象和共享停止标志
+    // 禁止拷贝，避免复制线程对象和共享停止标志。
     RabbitMqOssUploader(const RabbitMqOssUploader&) = delete;
     RabbitMqOssUploader& operator=(const RabbitMqOssUploader&) = delete;
 
-    // 启动后台消费者线程
+    // 启动后台消费者线程。
     void start();
 
-    // 停止后台消费者线程，并等待它退出
+    // 停止后台消费者线程，并等待它退出。
     void stop();
 
-    // 把上传文件内容保存到本地临时目录；成功时 temp_path 保存临时文件路径
+    // 把上传文件内容保存到本地临时目录；成功时 temp_path 保存临时文件路径。
     bool save_temp_file(int uid,
                         const std::string& hashcode,
                         const std::string& content,
                         std::string& temp_path);
 
-    // 删除本地临时文件；用于 MySQL 失败、发布消息失败、OSS 上传成功后的清理
+    // 删除本地临时文件；用于 MySQL 失败、发布消息失败、OSS 上传成功后的清理。
     void remove_temp_file(const std::string& temp_path);
 
-    // 发布一条 OSS 上传任务；消息体只保存 uid、hashcode、tempPath
+    // 发布一条 OSS 上传任务；消息体只保存 uid、hashcode、tempPath。
     bool publish(int uid, const std::string& hashcode, const std::string& temp_path);
 
 private:
-    // 后台线程入口函数：循环从 RabbitMQ 队列消费消息
+    // 后台线程入口函数：循环从 RabbitMQ 队列消费消息。
     void worker_loop();
 
 private:
     // 保存外部传进来的 OSS 存储对象地址，用于消费消息后上传文件。
-    // API Gateway 不消费消息，所以这里可以是 nullpt
+    // API Gateway 不消费消息，所以这里可以是 nullptr。
     OssStorage* oss_storage_;
 
-    // 主线程设置 stopping_=true 后，后台线程会尽快退出循环
+    // 主线程设置 stopping_=true 后，后台线程会尽快退出循环。
     std::atomic<bool> stopping_;
 
-    // 后台消费者线程对象
+    // 后台消费者线程对象。
     std::thread worker_;
 };

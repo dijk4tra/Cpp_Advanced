@@ -26,7 +26,7 @@ namespace consul_health = ppconsul::health;
 /*
     从环境变量读取字符串。
 
-    课程项目使用 .env + run.sh 导出环境变量，所以这里直接用 getenv。
+    项目使用 .env + run.sh 导出环境变量，所以这里直接用 getenv。
     如果变量不存在或为空字符串，就返回默认值。
 */
 static string get_env_or_default(const char* name, const string& default_value)
@@ -37,16 +37,12 @@ static string get_env_or_default(const char* name, const string& default_value)
     */
     const char* value = getenv(name);
 
-    /*
-        未设置或设置为空，都按“没有配置”处理。
-    */
+    // 未设置或设置为空，都按“没有配置”处理。
     if (value == nullptr || string(value).empty()) {
         return default_value;
     }
 
-    /*
-        转成 std::string，方便后续拼接和传参。
-    */
+    // 转成 std::string，方便后续拼接和传参。
     return string(value);
 }
 
@@ -57,14 +53,10 @@ static string get_env_or_default(const char* name, const string& default_value)
 */
 static int get_env_int(const char* name, int default_value)
 {
-    /*
-        先拿到字符串形式的环境变量。
-    */
+    // 先拿到字符串形式的环境变量。
     const char* value = getenv(name);
 
-    /*
-        没配置就返回默认值。
-    */
+    // 没配置就返回默认值。
     if (value == nullptr || string(value).empty()) {
         return default_value;
     }
@@ -84,9 +76,7 @@ static int get_env_int(const char* name, int default_value)
         return default_value;
     }
 
-    /*
-        当前配置值都很小，转 int 足够。
-    */
+    // 当前配置值都很小，转 int 足够。
     return static_cast<int>(number);
 }
 
@@ -106,35 +96,22 @@ static vector<string> consul_http_addrs()
         "CONSUL_HTTP_ADDRS",
         "http://127.0.0.1:8500,http://127.0.0.1:8501,http://127.0.0.1:8502");
 
-    /*
-        保存最终可用的地址。
-    */
+    // 保存最终可用的地址。
     vector<string> addrs;
 
-    /*
-        stringstream 可以按逗号逐段读取字符串，避免手写下标解析。
-    */
+    // stringstream 可以按逗号逐段读取字符串，避免手写下标解析。
     stringstream ss(raw_addrs);
 
-    /*
-        item 表示每次从逗号之间取出的一个地址。
-    */
+    // item 表示每次从逗号之间取出的一个地址。
     string item;
 
-    /*
-        持续读取，直到没有新的逗号分段。
-    */
+    // 持续读取，直到没有新的逗号分段。
     while (getline(ss, item, ',')) {
-        /*
-            .env 中的格式由人为保证：
-            地址之间只用英文逗号分隔，不在逗号前后添加空格。
-        */
+        // 地址之间只用英文逗号分隔，不在逗号前后添加空格。
         addrs.push_back(item);
     }
 
-    /*
-        返回地址列表。
-    */
+    // 返回地址列表。
     return addrs;
 }
 
@@ -206,33 +183,19 @@ string get_service_registry_host()
 ServiceRegistrar::ServiceRegistrar(const string& service_name,
                                    const string& host,
                                    unsigned short port)
-    /*
-        保存服务名。
-    */
+    // 保存服务名。
     : service_name_(service_name)
-    /*
-        根据服务名、host、port 生成唯一实例 ID。
-    */
+    // 根据服务名、host、port 生成唯一实例 ID。
     , service_id_(make_service_id(service_name, host, port))
-    /*
-        保存对外暴露 host。
-    */
+    // 保存对外暴露 host。
     , host_(host)
-    /*
-        保存监听端口。
-    */
+    // 保存监听端口。
     , port_(port)
-    /*
-        启动前还没有选中任何 Consul 节点。
-    */
+    // 启动前还没有选中任何 Consul 节点。
     , active_consul_addr_()
-    /*
-        构造时还没有注册成功。
-    */
+    // 构造时还没有注册成功。
     , registered_(false)
-    /*
-        构造时心跳线程不需要退出。
-    */
+    // 构造时心跳线程不需要退出。
     , stopping_(false)
 {}
 
@@ -240,7 +203,6 @@ ServiceRegistrar::~ServiceRegistrar()
 {
     /*
         析构时调用 stop()。
-
         如果 main() 已经显式 stop()，这里再次调用也安全。
     */
     stop();
@@ -259,13 +221,9 @@ bool ServiceRegistrar::start()
         学习项目里不做复杂负载均衡，谁先注册成功就先用谁。
     */
     for (const string& addr : addrs) {
-        /*
-            register_to_consul 内部会捕获异常并打印失败原因。
-        */
+        // register_to_consul 内部会捕获异常并打印失败原因。
         if (register_to_consul(addr)) {
-            /*
-                注册成功后，先标记状态，再启动心跳线程。
-            */
+            // 注册成功后，先标记状态，再启动心跳线程。
             {
                 lock_guard<mutex> lock(mutex_);
                 registered_ = true;
@@ -273,14 +231,10 @@ bool ServiceRegistrar::start()
                 active_consul_addr_ = addr;
             }
 
-            /*
-                启动后台心跳线程。
-            */
+            // 启动后台心跳线程。
             heartbeat_thread_ = thread(&ServiceRegistrar::heartbeat_loop, this);
 
-            /*
-                打印服务 ID 和 Consul 地址，方便在三节点环境排查当前注册到了哪个节点。
-            */
+            // 打印服务 ID 和 Consul 地址，方便在三节点环境排查当前注册到了哪个节点。
             cout << "[Consul] registered " << service_id_
                  << " at " << host_ << ":" << port_
                  << " via " << addr << endl;
@@ -296,17 +250,13 @@ bool ServiceRegistrar::start()
     cerr << "[Consul] register FAILED for " << service_id_
          << ": no available Consul address" << endl;
 
-    /*
-        返回 false，让服务 main 函数停止启动。
-    */
+    // 返回 false，让服务 main 函数停止启动。
     return false;
 }
 
 void ServiceRegistrar::stop()
 {
-    /*
-        先告诉心跳线程退出。
-    */
+    // 先告诉心跳线程退出。
     {
         lock_guard<mutex> lock(mutex_);
         stopping_ = true;
@@ -320,9 +270,7 @@ void ServiceRegistrar::stop()
         heartbeat_thread_.join();
     }
 
-    /*
-        只有成功注册过，才需要注销。
-    */
+    // 只有成功注册过，才需要注销。
     bool need_deregister = false;
     {
         lock_guard<mutex> lock(mutex_);
@@ -330,9 +278,7 @@ void ServiceRegistrar::stop()
         registered_ = false;
     }
 
-    /*
-        没注册成功时直接返回。
-    */
+    // 没注册成功时直接返回。
     if (!need_deregister) {
         return;
     }
@@ -348,15 +294,11 @@ void ServiceRegistrar::stop()
             consul_addr = active_consul_addr_;
         }
 
-        /*
-            创建 Consul Agent 客户端。
-        */
+        // 创建 Consul Agent 客户端。
         ppconsul::Consul consul = create_consul_client(consul_addr);
         consul_agent::Agent agent(consul);
 
-        /*
-            正常退出时主动注销服务实例，避免 Consul UI 残留旧实例。
-        */
+        // 正常退出时主动注销服务实例，避免 Consul UI 残留旧实例。
         agent.deregisterService(service_id_);
         cout << "[Consul] deregistered " << service_id_
              << " via " << consul_addr << endl;
@@ -372,9 +314,7 @@ void ServiceRegistrar::stop()
 
 void ServiceRegistrar::heartbeat_loop()
 {
-    /*
-        心跳间隔来自环境变量，默认 5 秒。
-    */
+    // 心跳间隔来自环境变量，默认 5 秒。
     const int heartbeat_seconds = consul_heartbeat_seconds();
 
     /*
@@ -383,18 +323,12 @@ void ServiceRegistrar::heartbeat_loop()
     */
     int failed_count = 0;
 
-    /*
-        循环直到 stop() 把 stopping_ 改成 true。
-    */
+    // 循环直到 stop() 把 stopping_ 改成 true。
     while (true) {
-        /*
-            保存本轮心跳要访问的 Consul 地址。
-        */
+        // 保存本轮心跳要访问的 Consul 地址。
         string consul_addr;
 
-        /*
-            每轮先检查是否需要退出。
-        */
+        // 每轮先检查是否需要退出。
         {
             lock_guard<mutex> lock(mutex_);
             if (stopping_) {
@@ -416,14 +350,10 @@ void ServiceRegistrar::heartbeat_loop()
             ppconsul::Consul consul = create_consul_client(consul_addr);
             consul_agent::Agent agent(consul);
 
-            /*
-                告诉 Consul：当前服务实例仍然健康。
-            */
+            // 告诉 Consul：当前服务实例仍然健康。
             agent.servicePass(service_id_);
 
-            /*
-                心跳成功后清零失败计数。
-            */
+            // 心跳成功后清零失败计数。
             failed_count = 0;
         } catch (const exception& ex) {
             /*
@@ -434,14 +364,10 @@ void ServiceRegistrar::heartbeat_loop()
                  << " via " << consul_addr
                  << ": " << ex.what() << endl;
 
-            /*
-                记录连续失败次数。
-            */
+            // 记录连续失败次数。
             ++failed_count;
 
-            /*
-                连续失败 2 次后，尝试换一个 Consul 节点并重新注册。
-            */
+            // 连续失败 2 次后，尝试换一个 Consul 节点并重新注册。
             if (failed_count >= 2) {
                 /*
                     切换成功后清零失败次数。
@@ -453,9 +379,7 @@ void ServiceRegistrar::heartbeat_loop()
             }
         }
 
-        /*
-            睡眠 heartbeat_seconds 秒后再发下一次心跳。
-        */
+        // 睡眠 heartbeat_seconds 秒后再发下一次心跳。
         this_thread::sleep_for(chrono::seconds(heartbeat_seconds));
     }
 }
@@ -463,14 +387,10 @@ void ServiceRegistrar::heartbeat_loop()
 bool ServiceRegistrar::register_to_consul(const string& consul_addr)
 {
     try {
-        /*
-            创建指定地址的 Consul 客户端。
-        */
+        // 创建指定地址的 Consul 客户端。
         ppconsul::Consul consul = create_consul_client(consul_addr);
 
-        /*
-            Agent API 负责注册当前进程提供的服务。
-        */
+        // Agent API 负责注册当前进程提供的服务。
         consul_agent::Agent agent(consul);
 
         /*
@@ -485,30 +405,22 @@ bool ServiceRegistrar::register_to_consul(const string& consul_addr)
             consul_agent::kw::tags = ppconsul::Tags { "srpc", "cloud-disk" },
             consul_agent::kw::check = consul_agent::TtlCheck { chrono::seconds(consul_ttl_seconds()) });
 
-        /*
-            注册成功。
-        */
+        // 注册成功。
         return true;
     } catch (const exception& ex) {
-        /*
-            注册失败通常是 Consul 没启动、地址写错或网络不通。
-        */
+        // 注册失败通常是 Consul 没启动、地址写错或网络不通。
         cerr << "[Consul] register FAILED for " << service_id_
              << " via " << consul_addr
              << ": " << ex.what() << endl;
 
-        /*
-            返回 false，让调用方继续尝试下一个 Consul 地址。
-        */
+        // 返回 false，让调用方继续尝试下一个 Consul 地址。
         return false;
     }
 }
 
 bool ServiceRegistrar::reregister_to_available_consul(const string& failed_consul_addr)
 {
-    /*
-        读取 Consul 地址列表。
-    */
+    // 读取 Consul 地址列表。
     vector<string> addrs = consul_http_addrs();
 
     /*
@@ -516,36 +428,26 @@ bool ServiceRegistrar::reregister_to_available_consul(const string& failed_consu
         如果 consul1 心跳失败，优先尝试 consul2/consul3。
     */
     for (const string& addr : addrs) {
-        /*
-            有多个地址时，先跳过刚刚失败的地址。
-        */
+        // 有多个地址时，先跳过刚刚失败的地址。
         if (addrs.size() > 1 && addr == failed_consul_addr) {
             continue;
         }
 
-        /*
-            切换节点时必须重新注册当前服务实例。
-        */
+        // 切换节点时必须重新注册当前服务实例。
         if (register_to_consul(addr)) {
-            /*
-                注册成功后更新当前活跃 Consul 地址。
-            */
+            // 注册成功后更新当前活跃 Consul 地址。
             {
                 lock_guard<mutex> lock(mutex_);
                 active_consul_addr_ = addr;
                 registered_ = true;
             }
 
-            /*
-                打印切换日志，方便观察故障转移。
-            */
+            // 打印切换日志，方便观察故障转移。
             cout << "[Consul] switched " << service_id_
                  << " from " << failed_consul_addr
                  << " to " << addr << endl;
 
-            /*
-                已经找到可用 Consul。
-            */
+            // 已经找到可用 Consul。
             return true;
         }
     }
@@ -555,24 +457,18 @@ bool ServiceRegistrar::reregister_to_available_consul(const string& failed_consu
         这样单节点配置仍然能按原逻辑持续重试。
     */
     if (register_to_consul(failed_consul_addr)) {
-        /*
-            原地址重新注册成功后，继续使用它。
-        */
+        // 原地址重新注册成功后，继续使用它。
         {
             lock_guard<mutex> lock(mutex_);
             active_consul_addr_ = failed_consul_addr;
             registered_ = true;
         }
 
-        /*
-            打印恢复日志。
-        */
+        // 打印恢复日志。
         cout << "[Consul] re-registered " << service_id_
              << " via " << failed_consul_addr << endl;
 
-        /*
-            重注册成功。
-        */
+        // 重注册成功。
         return true;
     }
 
@@ -583,9 +479,7 @@ bool ServiceRegistrar::reregister_to_available_consul(const string& failed_consu
     cerr << "[Consul] re-register FAILED for " << service_id_
          << ": no available Consul address" << endl;
 
-    /*
-        重注册失败。
-    */
+    // 重注册失败。
     return false;
 }
 
@@ -598,24 +492,16 @@ bool ServiceDiscovery::select(const string& service_name,
     */
     vector<string> addrs = consul_http_addrs();
 
-    /*
-        记录是否至少有一个 Consul API 正常响应。
-    */
+    // 记录是否至少有一个 Consul API 正常响应。
     bool any_consul_responded = false;
 
-    /*
-        依次尝试每一个 Consul 地址。
-    */
+    // 依次尝试每一个 Consul 地址。
     for (const string& addr : addrs) {
         try {
-            /*
-                创建当前地址的 Consul 客户端。
-            */
+            // 创建当前地址的 Consul 客户端。
             ppconsul::Consul consul = create_consul_client(addr);
 
-            /*
-                Health API 可以按健康状态查询服务实例。
-            */
+            // Health API 可以按健康状态查询服务实例。
             consul_health::Health health(consul);
 
             /*
@@ -625,14 +511,10 @@ bool ServiceDiscovery::select(const string& service_name,
             vector<consul_health::NodeServiceChecks> services =
                 health.service(service_name, consul_health::kw::passing = true);
 
-            /*
-                能执行到这里，说明当前 Consul API 正常响应了。
-            */
+            // 能执行到这里，说明当前 Consul API 正常响应了。
             any_consul_responded = true;
 
-            /*
-                保存可用 endpoint。
-            */
+            // 保存可用 endpoint。
             vector<ServiceEndpoint> endpoints;
 
             /*
@@ -640,9 +522,7 @@ bool ServiceDiscovery::select(const string& service_name,
                 当前只需要 ServiceInfo 中的 address/port。
             */
             for (const auto& item : services) {
-                /*
-                    tuple 下标 1 的元素是服务实例信息。
-                */
+                // tuple 下标 1 的元素是服务实例信息。
                 const ppconsul::ServiceInfo& service = get<1>(item);
 
                 /*
@@ -651,22 +531,16 @@ bool ServiceDiscovery::select(const string& service_name,
                 */
                 string host = service.address;
 
-                /*
-                    host 为空或 port 为 0，都不是可调用实例。
-                */
+                // host 为空或 port 为 0，都不是可调用实例。
                 if (host.empty() || service.port == 0) {
                     continue;
                 }
 
-                /*
-                    保存一个健康实例地址。
-                */
+                // 保存一个健康实例地址。
                 endpoints.push_back(ServiceEndpoint { host, service.port });
             }
 
-            /*
-                如果 Consul 查到了健康实例，就做一次简单轮询。
-            */
+            // 如果 Consul 查到了健康实例，就做一次简单轮询。
             if (!endpoints.empty()) {
                 lock_guard<mutex> lock(mutex_);
 
@@ -682,19 +556,13 @@ bool ServiceDiscovery::select(const string& service_name,
                 */
                 index = index % endpoints.size();
 
-                /*
-                    选出本次使用的实例。
-                */
+                // 选出本次使用的实例。
                 endpoint = endpoints[index];
 
-                /*
-                    下次请求使用下一个实例。
-                */
+                // 下次请求使用下一个实例。
                 index = (index + 1) % endpoints.size();
 
-                /*
-                    打印当前使用的 Consul 地址，方便三节点故障切换时观察。
-                */
+                // 打印当前使用的 Consul 地址，方便三节点故障切换时观察。
                 cout << "[Consul] discovered " << service_name
                      << " via " << addr << endl;
 
@@ -711,18 +579,12 @@ bool ServiceDiscovery::select(const string& service_name,
         }
     }
 
-    /*
-        至少有一个 Consul 响应了，但所有响应里都没有 passing 实例。
-    */
+    // 至少有一个 Consul 响应了，但所有响应里都没有 passing 实例。
     if (any_consul_responded) {
-        /*
-            Consul 正常响应但没有健康实例。
-        */
+        // Consul 正常响应但没有健康实例。
         cerr << "[Consul] no passing instance for " << service_name << endl;
     } else {
-        /*
-            所有 Consul 地址都查询失败。
-        */
+        // 所有 Consul 地址都查询失败。
         cerr << "[Consul] discovery FAILED for " << service_name
              << ": no available Consul address" << endl;
     }

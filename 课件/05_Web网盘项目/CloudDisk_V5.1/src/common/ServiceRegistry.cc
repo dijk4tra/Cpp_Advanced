@@ -30,48 +30,35 @@ namespace consul_health = ppconsul::health;
 */
 static string get_env_or_default(const char* name, const string& default_value)
 {
-    /*
-        getenv 返回 char*。
-        如果环境变量没有设置，返回 nullptr。
-    */
+    // getenv 返回 char*。
+    // 如果环境变量没有设置，返回 nullptr。
     const char* value = getenv(name);
 
-    /*
-        未设置或设置为空，都按“没有配置”处理。
-    */
+    // 未设置或设置为空，都按“没有配置”处理。
     if (value == nullptr || string(value).empty()) {
         return default_value;
     }
 
-    /*
-        转成 std::string，方便后续拼接和传参。
-    */
+    // 转成 std::string，方便后续拼接和传参。
     return string(value);
 }
 
 /*
     从环境变量读取整数。
-
     这里用于读取 TTL 秒数、心跳间隔秒数等简单配置。
 */
 static int get_env_int(const char* name, int default_value)
 {
-    /*
-        先拿到字符串形式的环境变量。
-    */
+    // 先拿到字符串形式的环境变量。
     const char* value = getenv(name);
 
-    /*
-        没配置就返回默认值。
-    */
+    // 没配置就返回默认值。
     if (value == nullptr || string(value).empty()) {
         return default_value;
     }
 
-    /*
-        strtol 用来把字符串转成长整数。
-        end 指向解析停止的位置。
-    */
+    // strtol 用来把字符串转成长整数。
+    // end 指向解析停止的位置。
     char* end = nullptr;
     long number = strtol(value, &end, 10);
 
@@ -83,15 +70,12 @@ static int get_env_int(const char* name, int default_value)
         return default_value;
     }
 
-    /*
-        当前配置值都很小，转 int 足够。
-    */
+    // 当前配置值都很小，转 int 足够。
     return static_cast<int>(number);
 }
 
 /*
     Consul HTTP API 地址。
-
     Docker 本地启动 Consul 时，默认 UI 和 HTTP API 都暴露在 8500 端口。
 */
 static string consul_http_addr()
@@ -101,8 +85,6 @@ static string consul_http_addr()
 
 /*
     Consul 数据中心名称。
-
-    PDF 示例里使用 dc1，这里也沿用 dc1 作为默认值。
 */
 static string consul_dc()
 {
@@ -111,7 +93,6 @@ static string consul_dc()
 
 /*
     TTL 健康检查的超时时间。
-
     如果服务超过这个时间没有发送 servicePass，Consul 会把实例标记成 critical。
 */
 static int consul_ttl_seconds()
@@ -121,7 +102,6 @@ static int consul_ttl_seconds()
 
 /*
     心跳发送间隔。
-
     它必须小于 TTL，默认 5 秒配合 10 秒 TTL。
 */
 static int consul_heartbeat_seconds()
@@ -131,7 +111,6 @@ static int consul_heartbeat_seconds()
 
 /*
     创建 Consul 客户端。
-
     ppconsul 构造 Consul 对象时需要传入 HTTP 地址和数据中心。
 */
 static ppconsul::Consul create_consul_client()
@@ -166,29 +145,17 @@ string get_service_registry_host()
 ServiceRegistrar::ServiceRegistrar(const string& service_name,
                                    const string& host,
                                    unsigned short port)
-    /*
-        保存服务名。
-    */
+    // 保存服务名。
     : service_name_(service_name)
-    /*
-        根据服务名、host、port 生成唯一实例 ID。
-    */
+    // 根据服务名、host、port 生成唯一实例 ID。
     , service_id_(make_service_id(service_name, host, port))
-    /*
-        保存对外暴露 host。
-    */
+    // 保存对外暴露 host。
     , host_(host)
-    /*
-        保存监听端口。
-    */
+    // 保存监听端口。
     , port_(port)
-    /*
-        构造时还没有注册成功。
-    */
+    // 构造时还没有注册成功。
     , registered_(false)
-    /*
-        构造时心跳线程不需要退出。
-    */
+    // 构造时心跳线程不需要退出。
     , stopping_(false)
 {}
 
@@ -196,7 +163,6 @@ ServiceRegistrar::~ServiceRegistrar()
 {
     /*
         析构时调用 stop()。
-
         如果 main() 已经显式 stop()，这里再次调用也安全。
     */
     stop();
@@ -205,14 +171,10 @@ ServiceRegistrar::~ServiceRegistrar()
 bool ServiceRegistrar::start()
 {
     try {
-        /*
-            创建 Consul 客户端。
-        */
+        // 创建 Consul 客户端。
         ppconsul::Consul consul = create_consul_client();
 
-        /*
-            Agent API 负责注册当前进程提供的服务。
-        */
+        // Agent API 负责注册当前进程提供的服务。
         consul_agent::Agent agent(consul);
 
         /*
@@ -227,31 +189,23 @@ bool ServiceRegistrar::start()
             consul_agent::kw::tags = ppconsul::Tags { "srpc", "cloud-disk" },
             consul_agent::kw::check = consul_agent::TtlCheck { chrono::seconds(consul_ttl_seconds()) });
 
-        /*
-            注册成功后，先标记状态，再启动心跳线程。
-        */
+        // 注册成功后，先标记状态，再启动心跳线程。
         {
             lock_guard<mutex> lock(mutex_);
             registered_ = true;
             stopping_ = false;
         }
 
-        /*
-            启动后台心跳线程。
-        */
+        // 启动后台心跳线程。
         heartbeat_thread_ = thread(&ServiceRegistrar::heartbeat_loop, this);
 
-        /*
-            打印服务 ID，方便在 Consul UI 和日志之间对应。
-        */
+        // 打印服务 ID，方便在 Consul UI 和日志之间对应。
         cout << "[Consul] registered " << service_id_
              << " at " << host_ << ":" << port_ << endl;
 
         return true;
     } catch (const exception& ex) {
-        /*
-            注册失败通常是 Consul 没启动、地址写错或网络不通。
-        */
+        // 注册失败通常是 Consul 没启动、地址写错或网络不通。
         cerr << "[Consul] register FAILED for " << service_id_
              << ": " << ex.what() << endl;
 
@@ -265,9 +219,7 @@ bool ServiceRegistrar::start()
 
 void ServiceRegistrar::stop()
 {
-    /*
-        先告诉心跳线程退出。
-    */
+    // 先告诉心跳线程退出。
     {
         lock_guard<mutex> lock(mutex_);
         stopping_ = true;
@@ -281,9 +233,7 @@ void ServiceRegistrar::stop()
         heartbeat_thread_.join();
     }
 
-    /*
-        只有成功注册过，才需要注销。
-    */
+    // 只有成功注册过，才需要注销。
     bool need_deregister = false;
     {
         lock_guard<mutex> lock(mutex_);
@@ -291,23 +241,17 @@ void ServiceRegistrar::stop()
         registered_ = false;
     }
 
-    /*
-        没注册成功时直接返回。
-    */
+    // 没注册成功时直接返回。
     if (!need_deregister) {
         return;
     }
 
     try {
-        /*
-            创建 Consul Agent 客户端。
-        */
+        // 创建 Consul Agent 客户端。
         ppconsul::Consul consul = create_consul_client();
         consul_agent::Agent agent(consul);
 
-        /*
-            正常退出时主动注销服务实例，避免 Consul UI 残留旧实例。
-        */
+        // 正常退出时主动注销服务实例，避免 Consul UI 残留旧实例。
         agent.deregisterService(service_id_);
         cout << "[Consul] deregistered " << service_id_ << endl;
     } catch (const exception& ex) {
@@ -329,18 +273,12 @@ void ServiceRegistrar::heartbeat_loop()
     ppconsul::Consul consul = create_consul_client();
     consul_agent::Agent agent(consul);
 
-    /*
-        心跳间隔来自环境变量，默认 5 秒。
-    */
+    // 心跳间隔来自环境变量，默认 5 秒。
     const int heartbeat_seconds = consul_heartbeat_seconds();
 
-    /*
-        循环直到 stop() 把 stopping_ 改成 true。
-    */
+    // 循环直到 stop() 把 stopping_ 改成 true。
     while (true) {
-        /*
-            每轮先检查是否需要退出。
-        */
+        // 每轮先检查是否需要退出。
         {
             lock_guard<mutex> lock(mutex_);
             if (stopping_) {
@@ -349,9 +287,7 @@ void ServiceRegistrar::heartbeat_loop()
         }
 
         try {
-            /*
-                告诉 Consul：当前服务实例仍然健康。
-            */
+            // 告诉 Consul：当前服务实例仍然健康。
             agent.servicePass(service_id_);
         } catch (const exception& ex) {
             /*
@@ -362,9 +298,7 @@ void ServiceRegistrar::heartbeat_loop()
                  << ": " << ex.what() << endl;
         }
 
-        /*
-            睡眠 heartbeat_seconds 秒后再发下一次心跳。
-        */
+        // 睡眠 heartbeat_seconds 秒后再发下一次心跳。
         this_thread::sleep_for(chrono::seconds(heartbeat_seconds));
     }
 }
@@ -373,14 +307,10 @@ bool ServiceDiscovery::select(const string& service_name,
                               ServiceEndpoint& endpoint)
 {
     try {
-        /*
-            创建 Consul 客户端。
-        */
+        // 创建 Consul 客户端。
         ppconsul::Consul consul = create_consul_client();
 
-        /*
-            Health API 可以按健康状态查询服务实例。
-        */
+        // Health API 可以按健康状态查询服务实例。
         consul_health::Health health(consul);
 
         /*
@@ -390,9 +320,7 @@ bool ServiceDiscovery::select(const string& service_name,
         vector<consul_health::NodeServiceChecks> services =
             health.service(service_name, consul_health::kw::passing = true);
 
-        /*
-            保存可用 endpoint。
-        */
+        // 保存可用 endpoint。
         vector<ServiceEndpoint> endpoints;
 
         /*
@@ -400,9 +328,7 @@ bool ServiceDiscovery::select(const string& service_name,
             当前只需要 ServiceInfo 中的 address/port。
         */
         for (const auto& item : services) {
-            /*
-                tuple 第 1 个元素是服务实例信息。
-            */
+            // tuple 第 1 个元素是服务实例信息。
             const ppconsul::ServiceInfo& service = get<1>(item);
 
             /*
@@ -411,22 +337,16 @@ bool ServiceDiscovery::select(const string& service_name,
             */
             string host = service.address;
 
-            /*
-                host 为空或 port 为 0，都不是可调用实例。
-            */
+            // host 为空或 port 为 0，都不是可调用实例。
             if (host.empty() || service.port == 0) {
                 continue;
             }
 
-            /*
-                保存一个健康实例地址。
-            */
+            // 保存一个健康实例地址。
             endpoints.push_back(ServiceEndpoint { host, service.port });
         }
 
-        /*
-            如果 Consul 查到了健康实例，就做一次简单轮询。
-        */
+        // 如果 Consul 查到了健康实例，就做一次简单轮询。
         if (!endpoints.empty()) {
             lock_guard<mutex> lock(mutex_);
 
@@ -442,27 +362,19 @@ bool ServiceDiscovery::select(const string& service_name,
             */
             index = index % endpoints.size();
 
-            /*
-                选出本次使用的实例。
-            */
+            // 选出本次使用的实例。
             endpoint = endpoints[index];
 
-            /*
-                下次请求使用下一个实例。
-            */
+            // 下次请求使用下一个实例。
             index = (index + 1) % endpoints.size();
 
             return true;
         }
 
-        /*
-            Consul 正常响应但没有健康实例。
-        */
+        // Consul 正常响应但没有健康实例。
         cerr << "[Consul] no passing instance for " << service_name << endl;
     } catch (const exception& ex) {
-        /*
-            查询失败通常是 Consul 不可用或地址错误。
-        */
+        // 查询失败通常是 Consul 不可用或地址错误。
         cerr << "[Consul] discovery FAILED for " << service_name
              << ": " << ex.what() << endl;
     }

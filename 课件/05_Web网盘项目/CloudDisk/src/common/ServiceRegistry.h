@@ -61,11 +61,8 @@ public:
                      const std::string& host,
                      unsigned short port);
 
-    /*
-        析构函数里会调用 stop()。
-
-        这样即使 main() 中忘记手动 stop，也会尽量停止心跳线程并注销服务。
-    */
+    // 析构函数里会调用 stop()。
+    // 这样即使 main() 中忘记手动 stop，也会尽量停止心跳线程并注销服务。
     ~ServiceRegistrar();
 
     /*
@@ -77,11 +74,7 @@ public:
     */
     bool start();
 
-    /*
-        停止心跳并注销服务。
-
-        正常 Ctrl+C 退出时，main() 会显式调用它。
-    */
+    // 停止心跳并注销服务。正常 Ctrl+C 退出时，main() 会显式调用它。
     void stop();
 
 private:
@@ -112,26 +105,17 @@ private:
     void heartbeat_loop();
 
 private:
-    /*
-        服务名，例如 AuthService。
-    */
+    // 服务名，例如 AuthService。
     std::string service_name_;
 
-    /*
-        实例 ID，例如 AuthService-127.0.0.1-9001。
-
-        Consul 允许同一个服务名下有多个实例，但每个实例 ID 必须唯一。
-    */
+    // 实例 ID，例如 AuthService-127.0.0.1-9001。
+    // Consul 允许同一个服务名下有多个实例，但每个实例 ID 必须唯一。
     std::string service_id_;
 
-    /*
-        当前实例对外暴露的地址。
-    */
+    // 当前实例对外暴露的地址。
     std::string host_;
 
-    /*
-        当前实例监听的 srpc 端口。
-    */
+    // 当前实例监听的 srpc 端口。
     unsigned short port_;
 
     /*
@@ -146,28 +130,17 @@ private:
     */
     std::string active_consul_addr_;
 
-    /*
-        表示是否已经成功注册到 Consul。
-
-        只有注册成功后，stop() 才需要注销服务。
-    */
+    // 表示是否已经成功注册到 Consul。只有注册成功后，stop() 才需要注销服务。
     bool registered_;
 
-    /*
-        心跳线程是否需要退出。
-    */
+    // 心跳线程是否需要退出。
     bool stopping_;
 
-    /*
-        保护 stopping_ 和 registered_。
-
-        心跳线程和主线程都会访问这两个变量，所以用一个简单互斥锁。
-    */
+    // 保护 stopping_ 和 registered_。
+    // 心跳线程和主线程都会访问这两个变量，所以用一个简单互斥锁。
     std::mutex mutex_;
 
-    /*
-        后台心跳线程。
-    */
+    // 后台心跳线程。
     std::thread heartbeat_thread_;
 };
 
@@ -206,18 +179,11 @@ private:
     */
     std::unordered_map<std::string, std::size_t> round_robin_index_;
 
-    /*
-        API Gateway 可能并发处理多个 HTTP 请求。
-
-        多个请求同时选择实例时会同时修改 round_robin_index_，
-        所以这里用 mutex 做最小保护。
-    */
+    // API Gateway 可能并发处理多个 HTTP 请求。
+    // 多个请求同时选择实例时会同时修改 round_robin_index_，所以这里用 mutex 做最小保护。
     std::mutex mutex_;
 };
 
-/*
-    读取当前服务注册到 Consul 时使用的 host。
-
-    单独暴露这个函数，是为了三个服务 main.cc 可以少写重复 getenv 代码。
-*/
+// 读取当前服务注册到 Consul 时使用的 host。
+// 单独暴露这个函数，是为了三个服务的 Main.cc 可以少写重复 getenv 代码。
 std::string get_service_registry_host();
