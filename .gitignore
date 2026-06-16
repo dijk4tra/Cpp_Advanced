@@ -31,3 +31,7 @@ cmake_install.cmake
 .env
 tmp/
 .cache/
+bin/
+*/bin/
+**/bin/
+***/bin/
