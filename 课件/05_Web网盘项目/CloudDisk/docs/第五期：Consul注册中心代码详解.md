@@ -102,7 +102,7 @@ flowchart TD
     end
 
     R["ServiceRegistrar<br/>注册/心跳/注销"]
-    C["Consul :8500<br/>服务注册中心"]
+    C["Consul Cluster<br/>8500 / 8501 / 8502"]
     D["ServiceDiscovery<br/>查询 passing 实例"]
     G["API Gateway<br/>server :8888"]
     B["Browser / curl / Postman"]
@@ -402,7 +402,7 @@ flowchart TD
 使用场景：
 
 ```text
-CONSUL_HTTP_ADDR
+CONSUL_HTTP_ADDRS
 CONSUL_DC
 CLOUDDISK_SERVICE_HOST
 ```
@@ -475,36 +475,58 @@ CONSUL_TTL_SECONDS=-1      -> 返回默认值 10
 CONSUL_TTL_SECONDS=        -> 返回默认值 10
 ```
 
-### 4. consul_http_addr()
+### 4. consul_http_addrs()
 
 代码：
 
 ```cpp
-static string consul_http_addr()
+static vector<string> consul_http_addrs()
 {
-    return get_env_or_default("CONSUL_HTTP_ADDR", "http://127.0.0.1:8500");
+    string raw_addrs = get_env_or_default(
+        "CONSUL_HTTP_ADDRS",
+        "http://127.0.0.1:8500,http://127.0.0.1:8501,http://127.0.0.1:8502");
+
+    vector<string> addrs;
+    stringstream ss(raw_addrs);
+    string item;
+
+    while (getline(ss, item, ',')) {
+        addrs.push_back(item);
+    }
+
+    return addrs;
 }
 ```
 
 作用：
 
 ```text
-读取 Consul HTTP API 地址。
+读取 Consul HTTP API 地址列表。
 ```
 
-默认值：
+三节点默认值：
 
 ```text
 http://127.0.0.1:8500
+http://127.0.0.1:8501
+http://127.0.0.1:8502
 ```
 
 对应 `.env`：
 
 ```env
-CONSUL_HTTP_ADDR=http://127.0.0.1:8500
+CONSUL_HTTP_ADDRS=http://127.0.0.1:8500,http://127.0.0.1:8501,http://127.0.0.1:8502
 ```
 
-这个地址供 ppconsul 使用。ppconsul 本质上是通过 Consul HTTP API 操作注册中心。
+这个地址列表供 ppconsul 使用。ppconsul 本质上是通过 Consul HTTP API 操作注册中心。
+
+为什么要返回 vector：
+
+```text
+1. 微服务启动注册时，可以按顺序尝试多个 Consul 地址。
+2. 心跳失败后，可以换另一个 Consul 地址并重新注册。
+3. API Gateway 服务发现失败时，可以继续查询下一个 Consul 地址。
+```
 
 ### 5. consul_dc()
 
@@ -600,9 +622,9 @@ TTL 默认 10 秒，心跳间隔必须小于 TTL。
 代码：
 
 ```cpp
-static ppconsul::Consul create_consul_client()
+static ppconsul::Consul create_consul_client(const string& consul_addr)
 {
-    return ppconsul::Consul(consul_http_addr(), ppconsul::kw::dc = consul_dc());
+    return ppconsul::Consul(consul_addr, ppconsul::kw::dc = consul_dc());
 }
 ```
 
@@ -618,7 +640,15 @@ static ppconsul::Consul create_consul_client()
 Consul consul("http://127.0.0.1:8500", ppconsul::kw::dc = "dc1");
 ```
 
-只是当前代码把地址和 dc 从环境变量读取。
+只是当前代码把地址作为参数传入，把 dc 从环境变量读取。
+
+为什么地址要作为参数传入：
+
+```text
+三节点 Consul 有多个 HTTP API 地址。
+注册、心跳、注销、服务发现都可能访问不同的 Consul 地址。
+所以 create_consul_client 不再自己读取单个固定地址，而是由调用方决定本次连接哪个地址。
+```
 
 为什么封装成函数：
 
@@ -626,7 +656,7 @@ Consul consul("http://127.0.0.1:8500", ppconsul::kw::dc = "dc1");
 1. 注册服务时要创建 Consul client。
 2. 心跳线程里也要创建 Consul client。
 3. 服务发现时也要创建 Consul client。
-4. 封装后避免重复写 consul_http_addr() 和 consul_dc()。
+4. 封装后避免重复写 ppconsul::Consul(...) 和 consul_dc()。
 ```
 
 ### 9. make_service_id()
@@ -1505,13 +1535,13 @@ flowchart TD
 
 ```text
 1. 读取 .env。
-2. 得到 CONSUL_CONTAINER，默认 consul1。
+2. 得到 CONSUL_CONTAINERS，默认 consul1,consul2,consul3。
 3. 检查 curl 是否存在。
-4. 检查 Consul 容器是否存在。
-5. 如果容器存在但没运行，尝试启动。
-6. 如果发现容器是 -bootstrap-expect 2 的旧三节点容器，直接退出。
-7. 等待 Consul HTTP API ready。
-8. Consul ready 后才启动业务进程。
+4. 逐个检查 Consul 容器是否存在。
+5. 如果某个容器存在但没运行，尝试 docker start。
+6. 得到 CONSUL_HTTP_ADDRS，默认 8500、8501、8502。
+7. 逐个请求 /v1/status/leader。
+8. ready 的 Consul HTTP API 数量达到 CONSUL_READY_MIN 后，才启动业务进程。
 ```
 
 流程图：
@@ -1520,29 +1550,29 @@ flowchart TD
 flowchart TD
     A["run.sh"] --> B["source .env"]
     B --> C["检查 RabbitMQ ready"]
-    C --> D["Checking Consul service"]
+    C --> D["Checking Consul cluster"]
     D --> E{"curl 是否存在?"}
     E -->|否| F["打印错误并退出"]
-    E -->|是| G{"Consul 容器是否存在?"}
-    G -->|否| H["打印错误并退出"]
-    G -->|是| I{"容器是否运行?"}
-    I -->|是| J["继续检查 HTTP API"]
-    I -->|否| K{"是否 -bootstrap-expect 2?"}
-    K -->|是| L["打印旧三节点容器错误并退出"]
-    K -->|否| M["docker start consul1"]
-    M --> J
-    J --> N["curl /v1/status/leader"]
-    N --> O{"30 秒内是否 ready?"}
+    E -->|是| G["拆分 CONSUL_CONTAINERS"]
+    G --> H{"逐个容器是否存在?"}
+    H -->|否| I["打印错误并退出"]
+    H -->|是| J{"容器是否运行?"}
+    J -->|否| K["docker start 对应容器"]
+    J -->|是| L["继续"]
+    K --> L
+    L --> M["拆分 CONSUL_HTTP_ADDRS"]
+    M --> N["逐个 curl /v1/status/leader"]
+    N --> O{"ready 数量 >= CONSUL_READY_MIN?"}
     O -->|否| P["打印错误并退出"]
     O -->|是| Q["启动 auth/user/filemeta/worker/server"]
 ```
 
-为什么检查 `-bootstrap-expect 2`：
+为什么要求 `CONSUL_READY_MIN=2`：
 
 ```text
-PDF 三节点示例中 consul1 使用 -bootstrap-expect 2。
-如果只启动这个旧 consul1，它不会作为单节点注册中心正常工作。
-当前 run.sh 只负责单节点 Consul，所以发现旧三节点容器时直接退出并提示重建。
+三节点 Consul 使用 Raft。
+Raft 需要多数派才能确认写入和维持 leader。
+3 个 server 的多数派是 2，所以本地三节点默认要求至少 2 个 HTTP API ready。
 ```
 
 ---
@@ -1552,9 +1582,10 @@ PDF 三节点示例中 consul1 使用 -bootstrap-expect 2。
 当前 `.env`：
 
 ```env
-CONSUL_HTTP_ADDR=http://127.0.0.1:8500
+CONSUL_HTTP_ADDRS=http://127.0.0.1:8500,http://127.0.0.1:8501,http://127.0.0.1:8502
 CONSUL_DC=dc1
-CONSUL_CONTAINER=consul1
+CONSUL_CONTAINERS=consul1,consul2,consul3
+CONSUL_READY_MIN=2
 CLOUDDISK_SERVICE_HOST=127.0.0.1
 CONSUL_TTL_SECONDS=10
 CONSUL_HEARTBEAT_SECONDS=5
@@ -1563,14 +1594,17 @@ CONSUL_HEARTBEAT_SECONDS=5
 含义：
 
 ```text
-CONSUL_HTTP_ADDR
-  ppconsul 访问 Consul HTTP API 的地址。
+CONSUL_HTTP_ADDRS
+  ppconsul 访问 Consul HTTP API 的地址列表。
 
 CONSUL_DC
   Consul 数据中心名称。
 
-CONSUL_CONTAINER
-  run.sh 检查和启动的 Docker 容器名。
+CONSUL_CONTAINERS
+  run.sh 检查和启动的 Docker 容器名列表。
+
+CONSUL_READY_MIN
+  run.sh 启动业务服务前要求 ready 的 Consul HTTP API 数量。
 
 CLOUDDISK_SERVICE_HOST
   微服务注册到 Consul 时写入的 address。
@@ -1668,8 +1702,10 @@ Consul consul("http://127.0.0.1:8500", ppconsul::kw::dc = "dc1");
 当前代码从 `.env` 来：
 
 ```text
-CONSUL_HTTP_ADDR
+CONSUL_HTTP_ADDRS
 CONSUL_DC
+CONSUL_CONTAINERS
+CONSUL_READY_MIN
 CLOUDDISK_SERVICE_HOST
 CONSUL_TTL_SECONDS
 CONSUL_HEARTBEAT_SECONDS

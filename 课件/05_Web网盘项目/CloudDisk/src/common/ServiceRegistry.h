@@ -86,6 +86,24 @@ public:
 
 private:
     /*
+        把当前服务实例注册到指定的 Consul HTTP API 地址。
+
+        三节点 Consul 改造后，服务启动时会依次尝试多个 Consul 地址。
+        这个函数把“向某个地址注册”的代码集中起来，避免 start()
+        和心跳失败后的重注册流程重复写同一段 ppconsul 调用。
+    */
+    bool register_to_consul(const std::string& consul_addr);
+
+    /*
+        心跳连续失败后，尝试切换到其它 Consul 节点并重新注册当前实例。
+
+        注意：
+        TTL 心跳只能发送给已经知道当前 service_id 的 Consul agent。
+        所以切换 Consul 节点时，不能只改心跳地址，必须先重新 registerService。
+    */
+    bool reregister_to_available_consul(const std::string& failed_consul_addr);
+
+    /*
         心跳线程入口。
 
         Consul TTL 检查要求服务定期调用 servicePass(service_id)，
@@ -115,6 +133,18 @@ private:
         当前实例监听的 srpc 端口。
     */
     unsigned short port_;
+
+    /*
+        当前已经成功注册到的 Consul HTTP API 地址。
+
+        例如：
+        - http://127.0.0.1:8500
+        - http://127.0.0.1:8501
+        - http://127.0.0.1:8502
+
+        心跳线程会使用这个地址发送 servicePass。
+    */
+    std::string active_consul_addr_;
 
     /*
         表示是否已经成功注册到 Consul。
