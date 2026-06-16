@@ -421,8 +421,7 @@ int main()
         ServiceRegistrar registrar("FileMetaService", service_host, port);
 
         /*
-            如果 Consul 是必需依赖且注册失败，当前服务启动失败。
-            如果不是必需依赖，registrar.start() 会允许服务继续运行。
+            registrar.start() 失败会返回 false，服务会退出。
         */
         if (!registrar.start()) {
             server.stop();
