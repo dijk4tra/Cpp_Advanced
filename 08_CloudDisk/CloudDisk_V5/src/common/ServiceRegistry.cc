@@ -361,11 +361,9 @@ bool ServiceDiscovery::select(const string& service_name,
             */
             index = index % endpoints.size();
 
-            // 选出本次使用的实例
-            endpoint = endpoints[index];
+            endpoint = endpoints[index]; // 选出本次使用的实例
 
-            // 下次请求使用下一个实例
-            index = (index + 1) % endpoints.size();
+            index = (index + 1) % endpoints.size(); // 下次请求使用下一个实例
 
             return true;
         }
