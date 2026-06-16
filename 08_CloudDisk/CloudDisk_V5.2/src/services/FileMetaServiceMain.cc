@@ -12,36 +12,6 @@ using namespace std;
 using namespace protocol;
 
 /*
-    把 MySQLCell 中的 file_size 转换成 int64。
-
-    为什么不直接用 as_ulonglong()？
-    - 当前 tbl_file.size 字段在课程项目中通常是普通 INT。
-    - Workflow 的 MySQLCell::as_ulonglong() 只接受 MYSQL_TYPE_LONGLONG。
-    - 如果对普通 INT 调 as_ulonglong()，它会返回 (unsigned long long)-1。
-    - 前端拿到这个异常大数后会被兜底逻辑显示成 0 B。
-
-    所以这里按 MySQL 实际字段类型做兼容：
-    - INT/SHORT/LONG 等走 as_int()
-    - BIGINT/LONGLONG 走 as_ulonglong()
-    - 其它异常情况返回 0
-*/
-static long long mysql_cell_to_file_size(const MySQLCell& cell)
-{
-    // tbl_file.size 当前是普通整数类型时，会走这里。
-    if (cell.is_int()) {
-        return cell.as_int();
-    }
-
-    // 如果后续把 size 改成 BIGINT，会走这里。
-    if (cell.is_ulonglong()) {
-        return static_cast<long long>(cell.as_ulonglong());
-    }
-
-    // 类型不符合预期时返回 0，避免前端显示异常。
-    return 0;
-}
-
-/*
     FileMetaService 是第四期拆出来的文件元数据微服务。
 
     它只负责 tbl_file：
@@ -105,7 +75,7 @@ public:
                 // 按 SELECT 字段顺序写入 FileInfo。
                 file->set_file_id(row[0].as_int());
                 file->set_filename(row[1].as_string());
-                file->set_size(mysql_cell_to_file_size(row[2]));
+                file->set_size(row[2].as_int());
                 file->set_created_at(row[3].as_string());
                 file->set_updated_at(row[4].as_string());
             }
