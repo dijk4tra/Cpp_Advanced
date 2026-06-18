@@ -1,4 +1,4 @@
-# 00_Workflow_Basic 知识点整理
+# 02_Workflow_Basic 知识点整理
 
 本章代码学习 workflow 的基础用法：原生 HTTP 服务端、HTTP 客户端异步任务、等待异步任务完成、MySQL 异步任务、MySQL DML/DQL 结果解析，以及把 HTTP 响应保存为文件的简单 wget 工具。
 
@@ -59,6 +59,22 @@ task->start();
 
 > [!IMPORTANT]
 > workflow 客户端任务是异步执行的。`start()` 返回时请求通常还没完成，主线程如果立刻结束，进程会退出，回调函数可能没有机会执行。
+
+基础异步任务模型可以画成下面的状态流程：
+
+```mermaid
+stateDiagram-v2
+    [*] --> Created: create_xxx_task
+    Created --> Configured: 设置请求或 SQL
+    Configured --> Submitted: task->start()
+    Submitted --> Running: workflow 异步调度
+    Running --> Callback: 任务完成
+    Callback --> SuccessPath: get_state 成功
+    Callback --> ErrorPath: get_state 失败
+    SuccessPath --> Done: 解析响应或结果
+    ErrorPath --> Done: 打印错误并收尾
+    Done --> [*]
+```
 
 ### 1.2 请求对象与响应对象
 
@@ -161,6 +177,29 @@ waitGroup.done();
 > [!IMPORTANT]
 > 使用 `WaitGroup` 时，回调函数里的每条返回路径都必须调用 `done()`。如果失败路径提前 `return` 但没有 `done()`，主线程会永久阻塞在 `wait()`。
 
+`WaitGroup` 在客户端示例中的作用是把异步回调和主线程退出条件连接起来：
+
+```mermaid
+sequenceDiagram
+    participant M as main线程
+    participant T as 异步任务
+    participant C as callback
+    participant W as WaitGroup
+
+    M->>W: 构造 WaitGroup(1)
+    M->>T: task->start()
+    M->>W: wait()
+    T->>C: 任务完成后执行回调
+    alt 成功路径
+        C->>C: 解析响应或结果
+        C->>W: done()
+    else 失败路径
+        C->>C: 打印错误
+        C->>W: done()
+    end
+    W-->>M: 计数归零，wait 返回
+```
+
 ### 2.3 与 `getchar()` 的区别
 
 `01_hello_workflow.cc` 中服务端使用：
@@ -220,6 +259,23 @@ WFGlobal::get_error_string(state, task->get_error())
 
 > [!NOTE]
 > 网络失败、DNS 失败、连接失败、SSL 失败通常体现在 `get_state()` 和 `get_error()`；HTTP 状态码和 MySQL SQL 错误需要继续解析响应对象。
+
+任务层成功之后，还要继续区分 HTTP 状态码、MySQL 错误包和业务结果：
+
+```mermaid
+flowchart TD
+    A[任务回调开始] --> B{get_state 是否成功}
+    B -->|否| C[任务层失败<br/>DNS/TCP/SSL/超时等]
+    C --> D[WFGlobal::get_error_string]
+    B -->|是| E{任务类型}
+    E -->|HTTP| F[读取 HttpResponse]
+    F --> G[检查 HTTP status code]
+    G --> H[再判断业务是否成功]
+    E -->|MySQL| I[读取 MySQLResponse]
+    I --> J{是否 MYSQL_PACKET_ERROR}
+    J -->|是| K[get_error_code/get_error_msg]
+    J -->|否| L[MySQLResultCursor 解析结果]
+```
 
 ## 4. `01_hello_workflow.cc`：最小 HTTP 服务端
 
@@ -295,6 +351,23 @@ resp->append_output_body(buf, size);
 
 > [!IMPORTANT]
 > `append_output_body(const char*)` 会按 C 字符串处理，依赖 `strlen()` 计算长度。如果 body 是二进制数据或包含 `'\0'`，应该使用 `append_output_body(buf, size)`。
+
+`01_hello_workflow.cc` 的服务端处理流程很短，所有请求都进入构造 `WFHttpServer` 时传入的回调：
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant S as WFHttpServer
+    participant T as WFHttpTask
+    participant R as HttpResponse
+
+    C->>S: HTTP 请求
+    S->>T: 为本次请求创建服务端任务
+    S->>T: 调用 server callback
+    T->>R: task->get_resp()
+    R->>R: append_output_body("<html>Hello World!</html>")
+    S-->>C: 发送 HTTP 响应
+```
 
 ### 4.4 启动服务
 
@@ -402,6 +475,32 @@ waitGroup.wait();
 3. 任务完成后调用 `http_callback()`。
 4. 回调里调用 `waitGroup.done()`。
 5. 主线程从 `waitGroup.wait()` 返回。
+
+`02_fetch_baidu.cc` 的实际执行时序如下：
+
+```mermaid
+sequenceDiagram
+    participant M as main
+    participant T as WFHttpTask
+    participant B as www.baidu.com
+    participant C as http_callback
+    participant W as WaitGroup
+
+    M->>T: create_http_task(url, 3, 3, callback)
+    M->>T: get_req()
+    M->>T: 设置 GET 方法
+    M->>T: 设置 User-Agent 请求头
+    M->>T: 设置 Connection close
+    M->>T: start()
+    M->>W: wait()
+    T->>B: 发送 HTTP GET
+    B-->>T: 返回 HTTP 响应
+    T->>C: 执行回调
+    C->>C: get_state / get_error
+    C->>C: 打印响应行、响应头、响应体
+    C->>W: done()
+    W-->>M: wait 返回，main 退出
+```
 
 ### 5.4 HTTP 回调中的状态检查
 
@@ -603,6 +702,26 @@ task->user_data = filename;
 struct Context {
     std::string filename;
 };
+```
+
+`practice/01_wget.cc` 中，命令行参数、`user_data` 和响应写文件的关系如下：
+
+```mermaid
+flowchart TD
+    A[main 读取 argv[1] URL] --> B[create_http_task]
+    C[main 读取 argv[2] 文件名] --> D[task->user_data = filename]
+    B --> E[设置 GET 请求和请求头]
+    E --> F[task->start]
+    F --> G[http_callback]
+    D --> G
+    G --> H[static_cast 取回文件名]
+    G --> I[task->get_resp 取响应]
+    H --> J[ofstream 以 binary 打开]
+    I --> K[写响应行和响应头]
+    I --> L[get_parsed_body 取 body 和 size]
+    L --> M[outfile.write 按 size 写入]
+    K --> N[waitGroup.done]
+    M --> N
 ```
 
 ### 6.3 二进制写文件
@@ -824,6 +943,31 @@ if (cursor.get_cursor_status() == MYSQL_STATUS_OK) {
 > [!NOTE]
 > `get_insert_id()` 只有在表存在自增字段且本次 INSERT 产生自增值时才有明显意义，否则可能为 `0`。
 
+`03_mysql_insert.cc` 的 INSERT 任务处理链路如下：
+
+```mermaid
+sequenceDiagram
+    participant M as main
+    participant T as WFMySQLTask
+    participant DB as MySQL Server
+    participant C as mysql_callback
+    participant W as WaitGroup
+
+    M->>T: create_mysql_task(mysql_url, 3, callback)
+    M->>T: get_req()
+    M->>T: 设置 INSERT SQL
+    M->>T: start()
+    M->>W: wait()
+    T->>DB: 发送 SQL
+    DB-->>T: 返回 MySQLResponse
+    T->>C: 执行回调
+    C->>C: get_state 检查任务层状态
+    C->>C: get_packet_type 检查 MySQL 错误包
+    C->>C: MySQLResultCursor 读取 affected_rows/insert_id
+    C->>W: done()
+    W-->>M: wait 返回，main 退出
+```
+
 ## 8. `04_mysql_select.cc`：MySQL SELECT 结果集
 
 ### 8.1 信号处理
@@ -845,6 +989,34 @@ void sig_handler(int)
 
 > [!CAUTION]
 > 严格来说，信号处理函数中能安全调用的函数非常有限。教学代码用它解除阻塞便于演示；真实项目中应使用更稳妥的退出机制。
+
+根据实际代码，SELECT 示例的退出机制和 INSERT 示例不同：回调负责打印结果，但没有调用 `waitGroup.done()`，程序需要 Ctrl-C 触发信号处理函数后退出。
+
+```mermaid
+sequenceDiagram
+    participant M as main
+    participant T as WFMySQLTask
+    participant DB as MySQL Server
+    participant C as mysql_callback
+    participant W as WaitGroup
+    participant U as User
+
+    M->>W: WaitGroup(1)
+    M->>M: signal(SIGINT, sig_handler)
+    M->>T: create_mysql_task
+    M->>T: 设置 SELECT SQL
+    M->>T: start()
+    M->>W: wait()
+    T->>DB: 发送 SELECT
+    DB-->>T: 返回结果集
+    T->>C: 执行 mysql_callback
+    C->>C: 检查 state 和 packet type
+    C->>C: fetch_row 循环打印 MySQLCell
+    Note over C,W: 实际代码没有调用 waitGroup.done()
+    U->>M: Ctrl-C
+    M->>W: sig_handler 调用 done()
+    W-->>M: wait 返回，程序退出
+```
 
 ### 8.2 执行 SELECT
 
@@ -982,6 +1154,30 @@ void display_cell(const MySQLCell& cell)
 > [!IMPORTANT]
 > 读取 `MySQLCell` 时要先判断类型再调用对应的 `as_xxx()`。类型不匹配时，workflow 的转换接口可能返回默认值或空字符串，容易掩盖数据问题。
 
+`display_cell()` 对不同 MySQL 字段类型的分支判断可以理解为下面的活动图：
+
+```mermaid
+flowchart TD
+    A[display_cell 接收 const MySQLCell&] --> B{is_null}
+    B -->|是| C[输出 NULL]
+    B -->|否| D{is_int}
+    D -->|是| E[as_int]
+    D -->|否| F{is_ulonglong}
+    F -->|是| G[as_ulonglong]
+    F -->|否| H{is_float}
+    H -->|是| I[as_float]
+    H -->|否| J{is_double}
+    J -->|是| K[as_double]
+    J -->|否| L{is_string}
+    L -->|是| M[as_string]
+    L -->|否| N{is_date}
+    N -->|是| O[as_date]
+    N -->|否| P{is_time}
+    P -->|是| Q[as_time]
+    P -->|否| R{is_datetime}
+    R -->|是| S[as_datetime]
+```
+
 ### 8.6 `const MySQLCell&` 的意义
 
 源码：
@@ -1051,6 +1247,23 @@ if (cursor.get_cursor_status() == MYSQL_STATUS_GET_RESULT) {
 
 > [!NOTE]
 > DML 和 DQL 的结果结构不同：DML 关注受影响行数和插入 id，DQL 关注字段数、行数和每一行的单元格。
+
+MySQL 任务成功后，还需要继续按包类型和 cursor 状态分流：
+
+```mermaid
+flowchart TD
+    A[WFMySQLTask 回调] --> B{get_state 成功?}
+    B -->|否| C[任务层错误<br/>打印 error string]
+    B -->|是| D[get_resp]
+    D --> E{packet_type 是 MYSQL_PACKET_ERROR?}
+    E -->|是| F[SQL 或约束错误<br/>get_error_code/get_error_msg]
+    E -->|否| G[创建 MySQLResultCursor]
+    G --> H{cursor status}
+    H -->|MYSQL_STATUS_OK| I[DML 成功<br/>affected_rows / insert_id]
+    H -->|MYSQL_STATUS_GET_RESULT| J[DQL 结果集<br/>field_count / rows_count / fetch_row]
+    H -->|MYSQL_STATUS_ERROR| K[结果游标错误]
+    H -->|MYSQL_STATUS_END| L[结果集结束]
+```
 
 ## 10. C++ 标准库知识点
 

@@ -1,4 +1,4 @@
-# 00_http 知识点整理
+# 01_http 知识点整理
 
 本章代码围绕 HTTP 基础通信展开，使用了两个第三方库：
 
@@ -111,6 +111,29 @@ Content-Length: 1024
 - 响应头：描述响应体类型、长度、缓存、服务器信息、重定向目标等。
 - 响应体：服务器真正返回的数据，例如 HTML、JSON、图片、文件。
 
+HTTP 请求和响应都可以理解为“起始行 + headers + 空行 + body”的文本协议结构：
+
+```mermaid
+flowchart LR
+    subgraph Req[HTTP Request]
+        R1[请求行<br/>Method URI Version]
+        R2[请求头 Headers]
+        R3[空行 CRLF]
+        R4[请求体 Body]
+        R1 --> R2 --> R3 --> R4
+    end
+
+    subgraph Resp[HTTP Response]
+        S1[响应行<br/>Version Status Reason]
+        S2[响应头 Headers]
+        S3[空行 CRLF]
+        S4[响应体 Body]
+        S1 --> S2 --> S3 --> S4
+    end
+
+    Req -->|服务端处理后生成| Resp
+```
+
 ## 2. wfrest 服务端模型
 
 ### 2.1 创建 HTTP 服务端
@@ -169,6 +192,27 @@ server.POST("/*", [](const HttpReq *req, HttpResp *resp) {
 
 > [!IMPORTANT]
 > `req` 和 `resp` 的生命周期由框架管理。回调函数内可以读取和设置它们，但不要把裸指针保存到异步回调之外长期使用，除非明确了解 workflow/wfrest 的任务生命周期。
+
+wfrest 服务端一次请求的处理路径可以概括为：
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant W as Workflow/WFServer
+    participant S as wfrest::HttpServer
+    participant R as Router
+    participant H as Route Handler
+    participant P as HttpResp
+
+    C->>W: 发送 HTTP 请求
+    W->>S: 解析为 HttpReq/HttpResp
+    S->>R: 根据 method + path 匹配路由
+    R->>H: 调用 lambda(req, resp)
+    H->>H: 读取 req 的 URI/header/body
+    H->>P: 设置 status/header/body
+    P-->>W: 响应对象准备完成
+    W-->>C: 写回 HTTP 响应
+```
 
 ### 2.3 启动与停止服务
 
@@ -278,6 +322,20 @@ current_path: /user/profile
 
 > [!NOTE]
 > `match_path()` 常用于通配路由，例如 `/*`。如果注册的是精确路由，例如 `/login`，它的意义就不如通配路由明显。
+
+通配路由下，原始 URI 到各个路径接口的关系如下：
+
+```mermaid
+flowchart TD
+    A[客户端请求<br/>/user/profile?id=10] --> B[get_request_uri<br/>/user/profile?id=10]
+    A --> C[URI 解析]
+    C --> D[current_path<br/>/user/profile]
+    C --> E[query_list<br/>id -> 10]
+    F[注册路由模板<br/>/*] --> G[路由匹配]
+    D --> G
+    G --> H[full_path<br/>/*]
+    G --> I[match_path<br/>user/profile]
+```
 
 ### 3.4 查询参数 `query_list()`
 
@@ -517,6 +575,28 @@ cout << dec << endl;
 > [!CAUTION]
 > 不要用 `strlen(body.c_str())` 计算 HTTP body 长度。二进制 body 中可能包含 `'\0'`，`strlen` 遇到第一个 `'\0'` 会提前停止，得到错误长度。
 
+POST 请求解析时，示例代码实际是在把 HTTP 字节流拆成 C++ 对象接口：
+
+```mermaid
+flowchart TD
+    A[POST 原始报文] --> B[请求行]
+    A --> C[请求头]
+    A --> D[空行]
+    A --> E[请求体]
+
+    B --> B1[get_method]
+    B --> B2[get_request_uri]
+    B --> B3[get_http_version]
+
+    C --> C1[HttpHeaderCursor 遍历]
+    C --> C2[Host / Content-Type / Content-Length]
+
+    E --> E1[req->body]
+    E1 --> E2{是否二进制?}
+    E2 -->|否| E3[可按文本输出]
+    E2 -->|是| E4[使用 size/十六进制/字节方式处理]
+```
+
 ### 4.7 服务端响应可以为空，但不推荐
 
 前几个服务端示例主要在服务端打印解析结果，没有显式设置响应体。
@@ -629,6 +709,30 @@ cout << "任务已提交！" << endl;
 
 这些过程不会阻塞当前线程等待完成。
 
+workflow HTTP 客户端任务的关键点是“提交后异步执行，完成后回调”：
+
+```mermaid
+sequenceDiagram
+    participant M as main线程
+    participant T as WFHttpTask
+    participant E as Workflow执行器
+    participant N as 网络/远端服务器
+    participant C as http_callback
+
+    M->>T: create_http_task(url, redirect_max, retry_max, cb)
+    M->>T: get_req 设置 method/uri/header/body
+    M->>T: start()
+    T-->>M: 立即返回
+    M->>M: getchar 或 WaitGroup 等待
+    T->>E: 进入异步调度
+    E->>N: DNS/TCP/HTTP 请求
+    N-->>E: HTTP 响应
+    E->>C: 调用回调
+    C->>T: get_state/get_error
+    C->>T: get_resp 解析响应
+    C-->>M: WaitGroup done 或打印结果
+```
+
 ### 5.4 回调函数
 
 示例代码：
@@ -669,6 +773,27 @@ void http_callback(WFHttpTask* task)
 
 > [!CAUTION]
 > HTTP 状态码 `404`、`500` 不一定导致 workflow 任务失败。只要网络请求和协议解析成功，任务状态仍可能是 `WFT_STATE_SUCCESS`。业务上是否成功还要继续检查 `resp->get_status_code()`。
+
+任务状态和 HTTP 状态码属于两个不同层次，可以用下面的状态图区分：
+
+```mermaid
+stateDiagram-v2
+    [*] --> Submitted: task->start()
+    Submitted --> NetworkRunning: workflow 调度
+    NetworkRunning --> TaskFailed: DNS/TCP/SSL/任务错误
+    NetworkRunning --> TaskSuccess: 网络与协议成功
+    TaskFailed --> Callback: get_state != WFT_STATE_SUCCESS
+    TaskSuccess --> CheckHttpStatus: get_state == WFT_STATE_SUCCESS
+    CheckHttpStatus --> BusinessSuccess: 2xx
+    CheckHttpStatus --> Redirect: 3xx
+    CheckHttpStatus --> ClientError: 4xx
+    CheckHttpStatus --> ServerError: 5xx
+    BusinessSuccess --> [*]
+    Redirect --> [*]
+    ClientError --> [*]
+    ServerError --> [*]
+    Callback --> [*]
+```
 
 ### 5.5 解析响应行
 
@@ -854,6 +979,20 @@ resp->set_header_pair("Location", "/newpage/301");
 > [!IMPORTANT]
 > 重定向必须设置 `Location` 响应头，否则客户端知道发生了 3xx，但不知道应该跳转到哪里。
 
+一次重定向交互通常不是一个请求，而是“原请求 + 后续请求”的组合：
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant S as Server
+
+    C->>S: 请求旧地址 /status/301
+    S-->>C: 301/303/307 + Location: /newpage/xxx
+    C->>C: 根据状态码决定是否换方法
+    C->>S: 请求 Location 指向的新地址
+    S-->>C: 返回最终资源
+```
+
 ### 6.2 301 Moved Permanently
 
 示例：
@@ -949,6 +1088,28 @@ server.POST("/status/307", [](const HttpReq* req, HttpResp* resp) {
 | `307` | `Temporary Redirect` | 否 | 保持原方法。 |
 
 如果需要更明确地区分永久且保持方法的重定向，可以了解 `308 Permanent Redirect`。
+
+301、303、307 在客户端后续请求方法上的差异可以画成活动图：
+
+```mermaid
+flowchart TD
+    A[客户端收到 3xx 响应] --> B{状态码}
+    B -->|301| C[读取 Location]
+    C --> D{客户端实现/历史兼容行为}
+    D -->|可能保持原方法| E[用原方法请求新地址]
+    D -->|很多客户端会把 POST 改 GET| F[用 GET 请求新地址]
+
+    B -->|303| G[读取 Location]
+    G --> H[改用 GET 请求新地址]
+
+    B -->|307| I[读取 Location]
+    I --> J[保持原方法和语义请求新地址]
+
+    E --> K[得到最终响应]
+    F --> K
+    H --> K
+    J --> K
+```
 
 ## 7. C++ 语法与工程知识点
 

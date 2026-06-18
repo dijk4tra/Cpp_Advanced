@@ -1,4 +1,4 @@
-# 00_SeriesWork 知识点整理
+# 03_SeriesWork 知识点整理
 
 本章代码重点学习 workflow 的串行任务流 `SeriesWork`：把多个异步任务按顺序组织起来，让后一个任务依赖前一个任务的结果。相比前两章，本章不再重复展开 HTTP 报文、MySQL 结果集、`WaitGroup` 等基础知识，只补充本目录代码中新出现或更深入使用的知识点。
 
@@ -57,6 +57,36 @@ series callback
   | waitGroup.done()
   v
 main resumes
+```
+
+对应的动态串行任务链可以画成：
+
+```mermaid
+flowchart TD
+    A[main 校验 URL 参数] --> B[创建 WFHttpTask]
+    B --> C[设置 HTTP 请求头、size limit、receive timeout]
+    C --> D[创建 WaitGroup]
+    D --> E[Workflow::create_series_work<br/>首任务是 httpTask]
+    E --> F[创建 SeriesContext<br/>url, size=0, success=false]
+    F --> G[设置序列上下文]
+    G --> H[启动序列]
+    H --> I[执行 HTTP task]
+    I --> J{HTTP callback 是否成功?}
+    J -->|否| K[不追加 MySQL task]
+    J -->|是| L[读取 body size 并写入 ctx->size]
+    L --> M[创建 WFMySQLTask]
+    M --> N[拼接 INSERT SQL]
+    N --> O[追加 MySQL 任务到序列尾部]
+    O --> P[执行 MySQL task]
+    P --> Q{MySQL callback 是否 OK?}
+    Q -->|是| R[标记序列成功]
+    Q -->|否| S[保持 success=false]
+    K --> T[series callback]
+    R --> T
+    S --> T
+    T --> U[打印 success/failed]
+    U --> V[delete ctx]
+    V --> W[通知 WaitGroup 完成]
 ```
 
 > [!IMPORTANT]
@@ -170,6 +200,39 @@ series callback
 > [!IMPORTANT]
 > series callback 不等同于某个任务的 callback。任务 callback 负责处理单个任务结果；series callback 负责处理整个序列收尾，例如释放上下文、通知主线程、汇总成功失败。
 
+`SeriesWork` 的核心时序如下：
+
+```mermaid
+sequenceDiagram
+    participant M as main
+    participant S as SeriesWork
+    participant H as HTTP task
+    participant HC as http_callback
+    participant Q as MySQL task
+    participant MC as mysql_callback
+    participant SC as series callback
+    participant W as WaitGroup
+
+    M->>S: 创建以 HTTP 为首任务的序列
+    M->>S: 设置上下文
+    M->>S: 启动序列
+    M->>W: 等待序列结束
+    S->>H: 调度首任务
+    H->>HC: HTTP 完成后执行
+    alt HTTP 成功且状态码为 2xx
+        HC->>S: 追加 MySQL 任务
+        S->>Q: HTTP callback 返回后执行 MySQL
+        Q->>MC: MySQL 完成后执行
+        MC->>S: 读取 context 并标记 success
+    else HTTP 失败或非 2xx
+        HC-->>S: 不追加后续任务
+    end
+    S->>SC: 序列结束后执行
+    SC->>SC: 释放上下文
+    SC->>W: 通知完成
+    W-->>M: main 继续
+```
+
 ## 3. 动态追加任务：`series->push_back()`
 
 ### 3.1 在 HTTP 回调中追加 MySQL 任务
@@ -220,6 +283,22 @@ string sql = "INSERT INTO tbl_webpage (url, size) VALUES ('"
 
 > [!NOTE]
 > `SeriesWork` 支持“先放入一个任务，后续任务在前一个任务 callback 中按需追加”。这适合分支逻辑、依赖上游结果的异步流程。
+
+`push_back()` 在本章中体现的是“运行时决定后续任务”：
+
+```mermaid
+stateDiagram-v2
+    [*] --> SeriesCreated: 首任务是 HTTP
+    SeriesCreated --> HttpRunning: 启动序列
+    HttpRunning --> HttpCallback: HTTP 完成
+    HttpCallback --> SeriesEnds: HTTP 失败或非 2xx
+    HttpCallback --> MysqlAppended: HTTP 成功，追加 MySQL
+    MysqlAppended --> MysqlRunning: callback 返回后调度
+    MysqlRunning --> MysqlCallback: MySQL 完成
+    MysqlCallback --> SeriesEnds: 回调结束
+    SeriesEnds --> SeriesCallback: 执行序列回调
+    SeriesCallback --> [*]
+```
 
 ### 3.3 `push_back()` 与 `push_front()`
 
@@ -287,6 +366,17 @@ series->push_back(mysqlTask);
 
 > [!IMPORTANT]
 > 只有已经放入 `SeriesWork` 并由序列调度的任务，`series_of(task)` 才有意义。独立创建但尚未加入序列的任务，不应该依赖 `series_of()`。
+
+`series_of(task)` 的查找关系可以理解为：
+
+```mermaid
+flowchart LR
+    A[SubTask: httpTask/mysqlTask] --> B[task 内部 pointer]
+    B --> C[SeriesWork]
+    C --> D[get_context]
+    D --> E[SeriesContext]
+    C --> F[push_back / cancel / is_finished]
+```
 
 ## 5. 序列级上下文：`set_context()` / `get_context()`
 
@@ -389,6 +479,25 @@ delete ctx;
 
 > [!IMPORTANT]
 > 如果数据属于整个流程，而不是某个单独任务，优先使用 `SeriesWork` context。这样可以减少多个任务之间手工传裸指针的混乱。
+
+本章 `SeriesContext` 的数据流如下：
+
+```mermaid
+flowchart TD
+    A[main new SeriesContext] --> B[url = argv[1]]
+    A --> C[size = 0]
+    A --> D[success = false]
+    A --> E[series->set_context(ctx)]
+    E --> F[http_callback get_context]
+    F --> G[读取 HTTP body size]
+    G --> H[ctx->size = size]
+    H --> I[拼接 SQL 使用 ctx->url 和 ctx->size]
+    E --> J[mysql_callback get_context]
+    J --> K[MySQL OK 后 ctx->success = true]
+    E --> L[series callback get_context]
+    L --> M[根据 success 打印结果]
+    M --> N[delete ctx]
+```
 
 ## 6. HTTP 任务中的新增设置
 
@@ -574,6 +683,24 @@ MySQL packet OK
 ctx->success = true;
 ```
 
+成功/失败标记的决策链如下：
+
+```mermaid
+flowchart TD
+    A[初始状态为失败] --> B{HTTP 任务状态成功?}
+    B -->|否| Z[保持 false]
+    B -->|是| C{HTTP status_code 是 2xx?}
+    C -->|否| Z
+    C -->|是| D[追加 MySQL INSERT]
+    D --> E{MySQL task state 成功?}
+    E -->|否| Z
+    E -->|是| F{MySQL packet 是 OK?}
+    F -->|否| Z
+    F -->|是| G[标记 success 为 true]
+    Z --> H[series callback 输出 failed]
+    G --> I[series callback 输出 success]
+```
+
 ## 8. SQL 拼接与风险
 
 ### 8.1 本章 SQL 拼接方式
@@ -684,6 +811,22 @@ SeriesWork* series = Workflow::create_series_work(
 > [!IMPORTANT]
 > 异步回调中引用捕获外部变量时，要确保被引用对象在回调执行时仍然存活。本章 `waitGroup` 是 `main()` 中的局部变量，`main()` 会阻塞在 `waitGroup.wait()`，直到 series callback 调用 `done()`，所以生命周期是匹配的。
 
+`waitGroup` 引用捕获的生命周期关系如下：
+
+```mermaid
+sequenceDiagram
+    participant M as main 栈帧
+    participant W as waitGroup
+    participant SC as series callback
+
+    M->>W: 构造局部 WaitGroup
+    M->>SC: lambda 按引用捕获 waitGroup
+    M->>M: waitGroup.wait() 保持 main 不返回
+    SC->>W: 序列结束后调用 done()
+    W-->>M: wait 返回
+    M->>W: main 结束，waitGroup 析构
+```
+
 ## 10. 内存管理与生命周期
 
 ### 10.1 `SeriesContext` 的生命周期
@@ -725,6 +868,19 @@ WFMySQLTask* mysqlTask = WFTaskFactory::create_mysql_task(...);
 > [!CAUTION]
 > 不要自行 `delete` 已经交给 workflow 调度的任务对象。任务生命周期由 workflow 框架管理；用户主要负责自己挂载的上下文数据，例如 `SeriesContext`。
 
+`SeriesContext` 和 workflow 任务对象的生命周期职责不同：
+
+```mermaid
+flowchart TD
+    A[main 创建 httpTask] --> B[交给 Workflow/SeriesWork 管理]
+    C[http_callback 创建 mysqlTask] --> B
+    D[main new SeriesContext] --> E[用户负责释放]
+    E --> F[series->set_context(ctx)]
+    F --> G[HTTP/MySQL/series callback 共享]
+    G --> H[series callback delete ctx]
+    B --> I[任务完成后由 workflow 管理释放]
+```
+
 ## 11. 取消序列：`cancel()`
 
 本章代码没有调用 `cancel()`，但 `SeriesWork` 提供该接口：
@@ -752,6 +908,18 @@ if (业务条件失败) {
 
 > [!NOTE]
 > 如果一个 series 已经提前放入多个后续任务，而中途发现不应继续执行，可以考虑 `cancel()`。如果后续任务还没有创建，直接不 `push_back()` 即可。
+
+如果使用 `cancel()`，控制流通常是：
+
+```mermaid
+flowchart TD
+    A[某个任务 callback] --> B{是否需要继续序列?}
+    B -->|是| C[正常返回，后续任务继续]
+    B -->|否| D[series_of(task)->cancel()]
+    D --> E[后续未执行任务被取消/销毁]
+    E --> F[series callback 仍会执行]
+    F --> G[统一释放 context / done]
+```
 
 ## 12. `02_assert.cc`：断言
 
@@ -824,6 +992,19 @@ static_assert(sizeof(int) == 4, "int的大小不为4");
 
 > [!IMPORTANT]
 > `assert` 是运行时检查，可能被 `NDEBUG` 关闭；`static_assert` 是编译期检查，不依赖程序运行，也不会被 `NDEBUG` 关闭。
+
+`assert` 与 `static_assert` 的检查阶段不同：
+
+```mermaid
+flowchart LR
+    A[源代码] --> B{static_assert}
+    B -->|条件为假| C[编译失败]
+    B -->|条件为真| D[生成可执行程序]
+    D --> E{运行时 assert}
+    E -->|条件为真| F[程序继续]
+    E -->|条件为假且未定义 NDEBUG| G[程序终止并打印位置]
+    E -->|定义 NDEBUG| H[assert 被禁用，不执行检查]
+```
 
 ## 13. 本章 C++ 语法点
 
