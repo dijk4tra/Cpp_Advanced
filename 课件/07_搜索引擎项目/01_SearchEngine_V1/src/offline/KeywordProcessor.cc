@@ -12,6 +12,8 @@
 
 KeywordProcessor::KeywordProcessor(const std::string& enStopWordsFile,
                                    const std::string& cnStopWordsFile)
+    // Jieba 构造时会加载分词词典，开销较大，因此作为成员只初始化一次。
+    // 停用词也在构造阶段一次性读入内存，后续扫描大量 token 时直接查集合。
     : tokenizer_()
     , enStopWords_(TextUtils::load_stop_words(enStopWordsFile))
     , cnStopWords_(TextUtils::load_stop_words(cnStopWordsFile))
@@ -25,6 +27,8 @@ void KeywordProcessor::process(const std::string& cnDir,
                                const std::string& enDict,
                                const std::string& enIndex)
 {
+    // 索引中保存的是词典文件的行号，因此每种语言都必须先生成词典，
+    // 再读取该词典构建对应索引，不能颠倒顺序。
     std::cout << "[Keyword] build English dictionary..." << std::endl;
     create_en_dict(enDir, enDict);
 
@@ -40,10 +44,14 @@ void KeywordProcessor::process(const std::string& cnDir,
 
 void KeywordProcessor::create_en_dict(const std::string& dir, const std::string& outfile)
 {
+    // map 同时承担词频统计和字典序排序。按 key 有序输出后，相同语料每次生成
+    // 的词典行号都保持稳定，这对行号型索引非常重要。
     std::map<std::string, int> wordFrequency;
     auto files = DirectoryScanner::scan(dir);
 
     for (const auto& file : files) {
+        // 任何语料文件无法读取都视为建库失败，避免只处理部分语料却生成
+        // 看似完整的词典。
         std::ifstream ifs(file);
         if (!ifs) {
             throw std::runtime_error("failed to open English corpus file: " + file);
@@ -56,7 +64,9 @@ void KeywordProcessor::create_en_dict(const std::string& dir, const std::string&
 
             std::istringstream iss(normalized);
             std::string word;
+            // 归一化已经把非字母替换为空格，因此流提取即可得到纯小写单词。
             while (iss >> word) {
+                // 停用词承载的信息量低，不应进入推荐候选词典。
                 if (enStopWords_.count(word) != 0) {
                     continue;
                 }
@@ -65,6 +75,8 @@ void KeywordProcessor::create_en_dict(const std::string& dir, const std::string&
         }
     }
 
+    // 输出格式固定为：word frequency。词典不显式写行号，行号由记录在文件中
+    // 的物理顺序隐含表示，并在 build_en_index 中从 1 开始重新计数。
     std::ofstream ofs(outfile);
     if (!ofs) {
         throw std::runtime_error("failed to open output dictionary: " + outfile);
@@ -80,6 +92,8 @@ void KeywordProcessor::create_en_dict(const std::string& dir, const std::string&
 
 void KeywordProcessor::build_en_index(const std::string& dict, const std::string& index)
 {
+    // 索引来源是刚生成的词典而不是原始统计 map，确保索引行号与磁盘文件
+    // 的真实记录顺序完全一致。
     std::ifstream ifs(dict);
     if (!ifs) {
         throw std::runtime_error("failed to open English dictionary: " + dict);
@@ -92,6 +106,7 @@ void KeywordProcessor::build_en_index(const std::string& dict, const std::string
     int lineNo = 0;
 
     while (ifs >> word >> frequency) {
+        // 课程约定词典行号从 1 开始；二期加载词典时必须使用相同约定。
         ++lineNo;
 
         // 一个单词中同一个字母可能出现多次，但索引中只需要记录一次该单词行号。
@@ -101,6 +116,8 @@ void KeywordProcessor::build_en_index(const std::string& dict, const std::string
         }
     }
 
+    // 输出格式：character lineNo1 lineNo2 ...
+    // 外层 map 保证字符有序，内层 set 保证行号有序且不重复。
     std::ofstream ofs(index);
     if (!ofs) {
         throw std::runtime_error("failed to open English index: " + index);
@@ -119,6 +136,7 @@ void KeywordProcessor::build_en_index(const std::string& dict, const std::string
 
 void KeywordProcessor::create_cn_dict(const std::string& dir, const std::string& outfile)
 {
+    // 中文词典同样使用 map 保证字典序输出稳定，值保存整个语料中的累计词频。
     std::map<std::string, int> wordFrequency;
     auto files = DirectoryScanner::scan(dir);
 
@@ -128,14 +146,19 @@ void KeywordProcessor::create_cn_dict(const std::string& dir, const std::string&
             throw std::runtime_error("failed to open Chinese corpus file: " + file);
         }
 
+        // 中文分词可能依赖跨行上下文，这里一次读入整篇文件后统一交给 Jieba，
+        // 而不是逐行切分。ostringstream 会保留原文件中的换行符。
         std::ostringstream buffer;
         buffer << ifs.rdbuf();
         std::string text = buffer.str();
 
         std::vector<std::string> words;
-        tokenizer_.Cut(text, words); // 默认 Mix 模式，适合课程项目中的中文分词。
+        // 未传 HMM 参数时使用 cppjieba 的 Mix 模式：先进行最大概率分词，
+        // 再用 HMM 识别未登录词，与 PDF 推荐方式一致。
+        tokenizer_.Cut(text, words);
 
         for (const auto& word : words) {
+            // 先过滤停用词，再过滤空白、标点、纯数字等无检索价值的 token。
             if (cnStopWords_.count(word) != 0) {
                 continue;
             }
@@ -146,6 +169,7 @@ void KeywordProcessor::create_cn_dict(const std::string& dir, const std::string&
         }
     }
 
+    // 输出格式与英文词典一致：word frequency，每条记录占一行。
     std::ofstream ofs(outfile);
     if (!ofs) {
         throw std::runtime_error("failed to open output dictionary: " + outfile);
@@ -161,6 +185,7 @@ void KeywordProcessor::create_cn_dict(const std::string& dir, const std::string&
 
 void KeywordProcessor::build_cn_index(const std::string& dict, const std::string& index)
 {
+    // 中文索引同样依据最终磁盘词典构建，避免内存顺序与输出顺序不一致。
     std::ifstream ifs(dict);
     if (!ifs) {
         throw std::runtime_error("failed to open Chinese dictionary: " + dict);
@@ -173,10 +198,14 @@ void KeywordProcessor::build_cn_index(const std::string& dict, const std::string
     int lineNo = 0;
 
     while (ifs >> word >> frequency) {
+        // 与英文索引统一，第一条词典记录的行号为 1。
         ++lineNo;
 
+        // 先按 Unicode 字符拆分，再用 set 去掉词内重复字符。例如一个词中
+        // 同一个汉字出现两次，该词典行号在对应字符索引中仍只保存一次。
         std::set<std::string> uniqueChars;
         for (const auto& ch : TextUtils::split_utf8_characters(word)) {
+            // 分词结果理论上已清洗，此处再次过滤可避免标点字符成为索引 key。
             if (!TextUtils::is_useless_token(ch)) {
                 uniqueChars.insert(ch);
             }
@@ -187,6 +216,8 @@ void KeywordProcessor::build_cn_index(const std::string& dict, const std::string
         }
     }
 
+    // 输出格式：UTF-8 character lineNo1 lineNo2 ...
+    // character 使用 string 保存，不能使用只能容纳单字节的 char。
     std::ofstream ofs(index);
     if (!ofs) {
         throw std::runtime_error("failed to open Chinese index: " + index);

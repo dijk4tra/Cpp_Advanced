@@ -10,6 +10,11 @@
 
 namespace
 {
+// 判断 path 最终指向的对象是否为普通文件。
+//
+// 这里使用 stat 而不是依赖 dirent::d_type，因为部分文件系统会把 d_type
+// 返回为 DT_UNKNOWN。stat 会跟随符号链接，所以指向普通文件的符号链接
+// 也会作为语料文件被接收。
 bool is_regular_file(const std::string& path)
 {
     struct stat st;
@@ -24,6 +29,8 @@ std::vector<std::string> DirectoryScanner::scan(const std::string& dir)
 {
     std::vector<std::string> files;
 
+    // PDF 要求使用目录流接口扫描语料目录。opendir 成功后，必须在函数返回前
+    // 与 closedir 成对调用；打开失败则抛异常，防止“空语料”被误认为正常结果。
     DIR* directory = ::opendir(dir.c_str());
     if (directory == nullptr) {
         throw std::runtime_error("opendir failed: " + dir + ", reason: " + std::strerror(errno));
@@ -37,21 +44,25 @@ std::vector<std::string> DirectoryScanner::scan(const std::string& dir)
             continue;
         }
 
+        // scan 对外返回可直接打开的完整路径，同时兼容调用者传入带或不带
+        // 末尾斜杠的目录名。
         std::string fullPath = dir;
         if (!fullPath.empty() && fullPath.back() != '/') {
             fullPath += '/';
         }
         fullPath += name;
 
-        // 这里只收集普通文件，避免把子目录、软链接等误当作语料处理。
+        // 子目录、设备文件等不会进入结果；指向普通文件的符号链接会被接收。
         if (is_regular_file(fullPath)) {
             files.push_back(fullPath);
         }
     }
 
+    // 目录流不再使用后及时释放其文件描述符。
     ::closedir(directory);
 
-    // 排序不是算法必需，但可以保证每次运行生成文件顺序一致，方便调试和对比。
+    // readdir 的返回顺序由文件系统决定。排序虽然不是算法必需，但能保证
+    // 文档初始编号和各输出文件在相同输入下稳定，方便测试及版本对比。
     std::sort(files.begin(), files.end());
     return files;
 }
