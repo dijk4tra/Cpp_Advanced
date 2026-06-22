@@ -1,4 +1,4 @@
-#include "common/Config.h"
+#include "../../include/common/Config.h"
 
 #include <algorithm>
 #include <cctype>

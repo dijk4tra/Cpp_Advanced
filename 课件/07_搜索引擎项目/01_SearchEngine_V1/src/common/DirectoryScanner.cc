@@ -1,4 +1,4 @@
-#include "common/DirectoryScanner.h"
+#include "../../include/common/DirectoryScanner.h"
 
 #include <algorithm>
 #include <cerrno>

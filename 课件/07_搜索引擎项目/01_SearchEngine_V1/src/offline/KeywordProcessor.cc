@@ -1,7 +1,7 @@
-#include "offline/KeywordProcessor.h"
+#include "../../include/offline/KeywordProcessor.h"
 
-#include "common/DirectoryScanner.h"
-#include "common/TextUtils.h"
+#include "../../include/common/DirectoryScanner.h"
+#include "../../include/common/TextUtils.h"
 
 #include <fstream>
 #include <iostream>

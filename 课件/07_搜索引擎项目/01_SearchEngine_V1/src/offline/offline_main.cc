@@ -1,6 +1,6 @@
-#include "common/Config.h"
-#include "offline/KeywordProcessor.h"
-#include "offline/PageProcessor.h"
+#include "../../include/common/Config.h"
+#include "../../include/offline/KeywordProcessor.h"
+#include "../../include/offline/PageProcessor.h"
 
 #include <exception>
 #include <filesystem>
@@ -32,8 +32,8 @@ int main()
         // 2. 构建网页搜索需要的网页库、偏移库和倒排索引库。
         PageProcessor pageProcessor(config.get("cn_stop_words"));
         pageProcessor.process(config.get("webpage_corpus_dir"),
-                              config.get("ripepage"),
-                              config.get("offset"),
+                              config.get("pages"),
+                              config.get("offsets"),
                               config.get("invert_index"));
 
         std::cout << "========== Build Finished ==========" << std::endl;

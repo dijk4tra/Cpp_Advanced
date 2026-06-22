@@ -1,7 +1,7 @@
-#include "offline/PageProcessor.h"
+#include "../../include/offline/PageProcessor.h"
 
-#include "common/DirectoryScanner.h"
-#include "common/TextUtils.h"
+#include "../../include/common/DirectoryScanner.h"
+#include "../../include/common/TextUtils.h"
 
 #include <algorithm>
 #include <cmath>

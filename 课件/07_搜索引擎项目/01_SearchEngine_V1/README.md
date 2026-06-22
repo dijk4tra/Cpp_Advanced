@@ -51,8 +51,8 @@ cn_dict=data/dict/dict_cn.dat
 en_dict_index=data/index/index_en.dat
 cn_dict_index=data/index/index_cn.dat
 
-ripepage=data/index/ripepage.dat
-offset=data/index/offset.dat
+pages=data/index/pages.dat
+offsets=data/index/offsets.dat
 invert_index=data/index/invert_index.dat
 ```
 
@@ -70,8 +70,8 @@ invert_index=data/index/invert_index.dat
    - 读取 `data/corpus/webpages` 中的 XML 文件
    - 使用 `tinyxml2` 提取 `<item>` 文档
    - 使用 `simhash` 去重
-   - 生成 `data/index/ripepage.dat`
-   - 生成 `data/index/offset.dat`
+   - 生成 `data/index/pages.dat`
+   - 生成 `data/index/offsets.dat`
    - 生成 `data/index/invert_index.dat`
 
 ## 依赖
@@ -115,8 +115,8 @@ data/dict/dict_en.dat
 data/dict/dict_cn.dat
 data/index/index_en.dat
 data/index/index_cn.dat
-data/index/ripepage.dat
-data/index/offset.dat
+data/index/pages.dat
+data/index/offsets.dat
 data/index/invert_index.dat
 ```
 

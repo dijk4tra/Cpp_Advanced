@@ -1,4 +1,4 @@
-#include "common/TextUtils.h"
+#include "../../include/common/TextUtils.h"
 
 #include <cctype>
 #include <fstream>
