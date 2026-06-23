@@ -73,27 +73,27 @@ void KeywordProcessor::create_en_dict(const std::string& dir, const std::string&
     // map 同时承担词频统计和字典序排序。按 key 有序输出后，
     // 相同语料每次生成的词典行号都保持稳定，这对行号型索引非常重要。
     std::map<std::string, int> wordFrequency;
-    auto files = DirectoryScanner::scan(dir);
+    std::vector<std::string> files = DirectoryScanner::scan(dir);
 
+    // 范围 for 逐个访问 vector 中的路径
     for (const auto& file : files) {
-        // 任何语料文件无法读取都视为建库失败，避免只处理部分语料却生成
-        // 看似完整的词典。
+        // 任何语料文件无法读取都视为建库失败
         std::ifstream ifs(file);
         if (!ifs) {
             throw std::runtime_error("failed to open English corpus file: " + file);
         }
 
-        // 阶段 2：逐行清洗和分词，避免一次将整个英文语料文件读入内存
+        // 阶段 2: 逐行清洗和分词, 避免一次将整个语料文件读入内存
         std::string line;
         while (std::getline(ifs, line)) {
-            // 英文语料要求: 数字和标点替换为空格，只保留字母，并统一小写。
+            // 英文语料要求：数字和标点替换为空格，只保留字母，并统一小写。
             std::string normalized = TextUtils::normalize_english_line(line);
 
             std::istringstream iss(normalized);
             std::string word;
-            // 归一化已经把非字母替换为空格，因此流提取即可得到纯小写单词。
+            // 归一化已经把非字母都替换为空格, 因此流提取即可得到纯小写字母
             while (iss >> word) {
-                // 停用词承载的信息量低，不应进入推荐候选词典。
+                // 过滤掉停用词
                 if (enStopWords_.count(word) != 0) {
                     continue;
                 }
@@ -104,16 +104,14 @@ void KeywordProcessor::create_en_dict(const std::string& dir, const std::string&
         }
     }
 
+    // 阶段三: 创建输出文件 dict_en.dat, 并将各单词和词频写入
     // 输出格式固定为：word frequency。词典不显式写行号，行号由记录在文件中的
     // 物理顺序隐含表示，并在 build_en_index 中从 1 开始重新计数。
-    // 阶段 3：创建输出文件。ofstream 默认使用截断模式，旧词典会被完整覆盖
     std::ofstream ofs(outfile);
     if (!ofs) {
         throw std::runtime_error("failed to open output dictionary: " + outfile);
     }
 
-    // C++17 结构化绑定把 map 元素 pair<const string, int> 分别命名为
-    // word 和 frequency；const auto& 避免复制键和值。
     for (const auto& [word, frequency] : wordFrequency) {
         ofs << word << ' ' << frequency << '\n';
     }
@@ -130,7 +128,7 @@ void KeywordProcessor::create_en_dict(const std::string& dir, const std::string&
  */
 void KeywordProcessor::build_en_index(const std::string& dict, const std::string& index)
 {
-    // 阶段 1：重新读取磁盘词典
+    // 阶段 1：重新读取磁盘中的词典文件
     // 索引来源是刚生成的词典而不是原始统计 map，
     // 确保索引行号与磁盘文件的真实记录顺序完全一致。
     std::ifstream ifs(dict);
@@ -146,20 +144,17 @@ void KeywordProcessor::build_en_index(const std::string& dict, const std::string
 
     // 每次连续提取一个 string 和一个 int
     while (ifs >> word >> frequency) {
-        // 课程约定词典行号从 1 开始；二期加载词典时必须使用相同约定。
-        ++lineNo;
+        ++lineNo; // 约定词典行号从 1 开始
 
         // 一个单词中同一个字母可能出现多次，但索引中只需要记录一次该单词行号。
         // set 的迭代器区间构造会遍历单词字符并自动去重、排序。
         std::set<char> uniqueChars(word.begin(), word.end());
         for (char ch : uniqueChars) {
-            // 嵌套容器表达 char -> set<lineNo>。外层 operator[] 首次访问 ch 时
-            // 创建空 set，insert 再写入当前行号。
             charIndex[ch].insert(lineNo);
         }
     }
 
-    // 阶段 2：覆盖写出索引文件
+    // 阶段 2: 将字符索引写入文件 index_en.dat
     // 输出格式：character lineNo1 lineNo2 ...
     // 外层 map 保证字符有序，内层 set 保证行号有序且不重复。
     std::ofstream ofs(index);
@@ -169,6 +164,8 @@ void KeywordProcessor::build_en_index(const std::string& dict, const std::string
 
     for (const auto& [ch, lines] : charIndex) {
         ofs << ch;
+        // lines 已由 set 排序，按值遍历 int 没有复制开销问题
+        // 64 位操作系统中：一个 int 通常占用 4 个字节, 一个指针/引用通常占用 8 个字节
         for (int no : lines) {
             ofs << ' ' << no;
         }
@@ -238,4 +235,65 @@ void KeywordProcessor::create_cn_dict(const std::string& dir, const std::string&
 
     std::cout << "[Keyword] Chinese files: " << files.size()
               << ", dict size: " << wordFrequency.size() << std::endl;
+}
+
+/**
+ * @brief 根据中文词典建立“Unicode 字符到词典行号集合”的索引。
+ * @param dict 中文词典输入路径。
+ * @param index 中文字符索引输出路径。
+ * @throws std::runtime_error 输入词典或输出索引无法打开时抛出。
+ * @throws utf8::exception 词典中存在非法 UTF-8 单词时抛出。
+ */
+void KeywordProcessor::build_cn_index(const std::string& dict, const std::string& index)
+{
+    // 阶段 1：重新读取磁盘中的词典文件
+    std::ifstream ifs(dict);
+    if (!ifs) {
+        throw std::runtime_error("failed to open Chinese dictionary: " + dict);
+    }
+
+    // 中文字符是 UTF-8 多字节字符，key 必须用 string，不能用 char。
+    std::map<std::string, std::set<int>> charIndex;
+    std::string word;
+    int frequency = 0;
+    int lineNo = 0;
+
+    while (ifs >> word >> frequency) {
+        ++lineNo; // 约定词典行号从 1 开始
+
+        // 先按 Unicode 字符拆分，再用 set 去掉词内重复字符
+        std::set<std::string> uniqueChars;
+        // split_utf8_characters 返回临时 vector，其生命周期会延长到
+        // 本次范围 for 循环结束；ch 通过常量引用绑定到其中的每个 UTF-8 字符串。
+        for (const auto& ch : TextUtils::split_utf8_characters(word)) {
+            // 正常生成的中文词典已经是纯汉字；此处再次校验，使函数读取外部或
+            // 旧词典时也不会把英文字母、数字和特殊符号写入中文索引。
+            if (TextUtils::is_chinese_word(ch)) {
+                uniqueChars.insert(ch);
+            }
+        }
+
+        for (const auto& ch : uniqueChars) {
+            charIndex[ch].insert(lineNo);
+        }
+    }
+
+
+    // 阶段 2: 将字符索引写入文件 index_cn.dat
+    // 输出格式：UTF-8 character lineNo1 lineNo2 ...
+    // character 使用 string 保存，不能使用只能容纳单字节的 char。
+    std::ofstream ofs(index);
+    if (!ofs) {
+        throw std::runtime_error("failed to open Chinese index: " + index);
+    }
+
+    for (const auto& [ch, lines] : charIndex) {
+        ofs << ch;
+        for (int no : lines) {
+            ofs << ' ' << no;
+        }
+        ofs << '\n';
+    }
+
+    std::cout << "[Keyword] Chinese index keys: " << charIndex.size() << std::endl;
 }

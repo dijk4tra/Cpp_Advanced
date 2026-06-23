@@ -53,7 +53,7 @@ bool is_han_code_point(char32_t codePoint)
         || (codePoint >= 0x30000 && codePoint <= 0x3134F)
         || (codePoint >= 0x31350 && codePoint <= 0x323AF);
 }
-}
+} // end of unnamed namespace
 
 namespace TextUtils
 {

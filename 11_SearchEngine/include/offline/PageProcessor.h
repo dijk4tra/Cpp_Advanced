@@ -11,7 +11,7 @@
  * @brief 构建网页搜索所需的网页库、偏移库和倒排索引库。
  *
  * 完整流程为：从 XML 的 `<item>` 提取文档，使用 64 位 SimHash 去重并重新
- * 连续编号，生成 pages.dat 和 offsets.dat，最后按课程公式计算归一化 TF-IDF
+ * 连续编号，生成 pages.dat 和 offsets.dat，最后按公式计算归一化 TF-IDF
  * 并生成 invert_index.dat。
  *
  * 三个输出文件共享同一组去重后的文档 id。调用 process() 时必须保持阶段顺序，

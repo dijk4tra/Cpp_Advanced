@@ -103,7 +103,12 @@ simhash
 在 `01_SearchEngine_V1` 目录中执行：
 
 ```bash
+# 第一步：根据 CMakeLists.txt 生成构建系统
+# -S .      指定源码目录是当前目录
+# -B build  指定构建目录是 build
 cmake -S . -B build
+# 第二步：调用构建系统真正编译代码
+# --build build 表示在 build 目录下执行构建
 cmake --build build
 ./bin/offline_builder
 ```
