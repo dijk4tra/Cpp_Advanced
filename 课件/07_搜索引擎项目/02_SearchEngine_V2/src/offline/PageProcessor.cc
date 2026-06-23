@@ -1,0 +1,437 @@
+#include "../../include/offline/PageProcessor.h"
+
+#include "../../include/common/DirectoryScanner.h"
+#include "../../include/common/TextUtils.h"
+
+#include <algorithm>
+#include <cmath>
+#include <fstream>
+#include <iomanip>
+#include <iostream>
+#include <map>
+#include <set>
+#include <sstream>
+#include <stdexcept>
+#include <tinyxml2.h>
+
+namespace
+{
+// 匿名命名空间中的 XML 和 SimHash 辅助函数不会暴露到其他翻译单元。
+
+/**
+ * @brief 安全读取 XML 父元素中指定子元素的文本。
+ *
+ * tinyxml2 的 GetText() 返回指向 XMLDocument 内部存储的指针，本函数立即复制
+ * 为 std::string，使返回值不依赖该指针的生命周期。
+ *
+ * @param parent 要查询的父元素，可以为 nullptr。
+ * @param childName 子元素标签名，必须是有效的 C 字符串。
+ * @return 子元素文本副本；父元素、子元素或文本不存在时返回空字符串。
+ * @throws std::bad_alloc 构造返回字符串时内存分配失败可能抛出。
+ */
+std::string element_text(tinyxml2::XMLElement* parent, const char* childName)
+{
+    if (parent == nullptr) {
+        return "";
+    }
+
+    // `->` 用于通过指针访问对象成员；前面的 nullptr 检查保证解引用安全。
+    tinyxml2::XMLElement* child = parent->FirstChildElement(childName);
+    if (child == nullptr || child->GetText() == nullptr) {
+        return "";
+    }
+
+    return child->GetText();
+}
+
+/**
+ * @brief 递归收集 XML 子树中的全部 `<item>` 元素。
+ *
+ * 不同语料可能使用 rss/channel/item 等不同包装层级，因此采用深度优先遍历，
+ * 不把元素路径写死。items 中的裸指针由 XMLDocument 持有，调用者必须在
+ * XMLDocument 析构前使用完毕。
+ *
+ * @param node 当前遍历节点，可以为 nullptr。
+ * @param items 输出参数，找到的 item 元素指针会追加到该 vector。
+ * @throws std::bad_alloc items 扩容时内存分配失败可能抛出。
+ */
+void collect_items(tinyxml2::XMLNode* node, std::vector<tinyxml2::XMLElement*>& items)
+{
+    if (node == nullptr) {
+        return;
+    }
+
+    // C++17 允许在 if 条件中声明并初始化变量。ToElement() 对非元素节点返回
+    // nullptr，指针转换为 bool 后决定是否进入分支。
+    if (auto* element = node->ToElement()) {
+        if (std::string(element->Name()) == "item") {
+            items.push_back(element);
+        }
+    }
+
+    // 无论当前节点是不是 item，都继续检查其子树，保证嵌套 item 不被遗漏。
+    // for 的三个部分分别负责取得第一个子节点、检查指针非空、移动到下一个
+    // 兄弟节点；对每个子节点递归即形成深度优先遍历。
+    for (tinyxml2::XMLNode* child = node->FirstChild(); child; child = child->NextSibling()) {
+        collect_items(child, items);
+    }
+}
+
+/**
+ * @brief 按正文 UTF-8 字节长度计算 SimHash 的 topN 参数。
+ *
+ * 采用 PDF 推荐公式 `max(5, min(200, text.size()/120))`，将结果限制在
+ * `[5, 200]`。公式按字节数估算，无需换算 Unicode 字符数。
+ *
+ * @param text 网页正文。
+ * @return 传给 Simhasher::make 的关键词数量。
+ * @note 异常处理：本函数不抛出异常。
+ */
+int simhash_top_n(const std::string& text)
+{
+    // PDF 中给出的推荐规则：max(5, min(200, text.size() / 120))。
+    // size() 返回无符号 size_t；除法后结果最多受上限 200 约束，此处显式转换
+    // 为 Simhasher 接口需要的 int。
+    int topN = static_cast<int>(text.size() / 120);
+    topN = std::max(5, topN);
+    topN = std::min(200, topN);
+    return topN;
+}
+}
+
+/**
+ * @brief 构造网页搜索离线处理器。
+ * @param stopWordsFile 中文停用词文件路径。
+ * @throws std::runtime_error 停用词文件无法打开时抛出。
+ * @throws cppjieba 或 simhash 初始化失败时产生的异常会自然传播。
+ */
+PageProcessor::PageProcessor(const std::string& stopWordsFile)
+    // Jieba 和 Simhasher 初始化时都需要加载词典，作为成员只构造一次。
+    // 网页倒排索引使用中文停用词过滤高频低信息量词语。
+    : tokenizer_()
+    , hasher_()
+    , stopWords_(TextUtils::load_stop_words(stopWordsFile))
+{
+}
+
+/**
+ * @brief 按固定依赖顺序生成网页库、偏移库和倒排索引库。
+ * @param dir 网页 XML 语料目录。
+ * @param pages 网页库输出路径。
+ * @param offsets 偏移库输出路径。
+ * @param invertIndex 倒排索引输出路径。
+ * @throws std::runtime_error 目录无法扫描或任一输出文件无法打开时抛出。
+ * @throws utf8::exception 分词结果编码非法时可能抛出。
+ */
+void PageProcessor::process(const std::string& dir,
+                            const std::string& pages,
+                            const std::string& offsets,
+                            const std::string& invertIndex)
+{
+    // 四个阶段具有严格的数据依赖：
+    // 1. 从 XML 得到原始 documents_；
+    // 2. 原地替换为去重文档并重新编号；
+    // 3. 使用最终编号生成网页库和偏移库；
+    // 4. 使用同一批文档生成倒排索引。
+    std::cout << "[Page] extract documents..." << std::endl;
+    extract_documents(dir);
+
+    std::cout << "[Page] deduplicate documents..." << std::endl;
+    deduplicate_documents();
+
+    std::cout << "[Page] build pages and offsets..." << std::endl;
+    build_pages_and_offsets(pages, offsets);
+
+    std::cout << "[Page] build inverted index..." << std::endl;
+    build_inverted_index(invertIndex);
+}
+
+/**
+ * @brief 从目录内所有可解析 XML 文件提取有效文档。
+ * @param dir 网页 XML 语料目录。
+ * @throws std::runtime_error dir 无法扫描时抛出。
+ * @note 单个 XML 文件加载失败只输出错误日志并跳过，不中断其他文件处理。
+ */
+void PageProcessor::extract_documents(const std::string& dir)
+{
+    // 阶段 1：重置状态并取得稳定排序后的 XML 文件列表。
+    // process 未来若被重复调用，先清空上一次结果，避免文档累积。
+    documents_.clear();
+    auto files = DirectoryScanner::scan(dir);
+
+    // 此处 id 只是提取阶段的临时连续编号，SimHash 去重后还会再次编号。
+    int nextId = 1;
+    int rawItems = 0;
+
+    // 阶段 2：逐文件解析。XMLDocument 是当前循环迭代中的栈对象，离开本轮
+    // 循环即析构，因此所有元素指针必须在本轮转换为自有 std::string。
+    for (const auto& file : files) {
+        tinyxml2::XMLDocument xml;
+        // tinyxml2 以错误码报告解析状态，而不是为普通解析错误抛异常。
+        tinyxml2::XMLError err = xml.LoadFile(file.c_str());
+        if (err != tinyxml2::XML_SUCCESS) {
+            // 单个 XML 损坏时跳过该文件并继续处理其他语料；日志保留文件路径，
+            // 便于离线任务结束后定位并修复原始数据。
+            std::cerr << "[Page] skip invalid XML: " << file << std::endl;
+            continue;
+        }
+
+        // vector 保存非拥有型指针：XMLDocument 负责节点内存，items 只暂时引用。
+        std::vector<tinyxml2::XMLElement*> items;
+        collect_items(&xml, items);
+        rawItems += static_cast<int>(items.size());
+
+        // 阶段 3：按 PDF 的 content/description 优先级生成 Document。
+        for (tinyxml2::XMLElement* item : items) {
+            // PDF 要求：优先使用 content；没有 content 时使用 description；
+            // 两者都不存在或文本为空时，该 item 无法参与正文检索，直接忽略。
+            std::string content = element_text(item, "content");
+            if (content.empty()) {
+                content = element_text(item, "description");
+            }
+            if (content.empty()) {
+                continue;
+            }
+
+            // link 和 title 缺失不会阻止文档进入网页库，读取函数会返回空串。
+            // content 已在上方保证非空。
+            Document doc;
+            doc.id = nextId++;
+            doc.link = element_text(item, "link");
+            doc.title = element_text(item, "title");
+            doc.content = content;
+            // std::move 将 doc 转为右值，使 vector 可移动其 string 成员，避免复制
+            // 正文等大字符串。移动后 doc 不再使用，并在本轮末尾正常析构。
+            documents_.push_back(std::move(doc));
+        }
+    }
+
+    std::cout << "[Page] XML files: " << files.size()
+              << ", raw items: " << rawItems
+              << ", valid documents: " << documents_.size() << std::endl;
+}
+
+/**
+ * @brief 使用 SimHash 删除近似重复文档并重新连续编号。
+ * @throws simhash 或其分词依赖产生的异常会自然传播。
+ *
+ * @details 当前实现保留每组近似文档中首次出现的一篇。每篇新文档都与此前
+ * 保留文档比较，因此时间复杂度为 O(n^2)，额外空间复杂度为 O(n)。
+ */
+void PageProcessor::deduplicate_documents()
+{
+    // 阶段 1：计算指纹，并选择首次出现的非重复文档。
+    // uniqueDocuments 与 fingerprints 按相同下标一一对应，只为已经接受的
+    // 非重复文档保存指纹。
+    std::vector<Document> uniqueDocuments;
+    std::vector<uint64_t> fingerprints;
+
+    for (const auto& doc : documents_) {
+        uint64_t hash = 0;
+        // SimHash 将正文压缩成 64 位局部敏感指纹；相似文本倾向于拥有更小的
+        // 汉明距离。topN 随正文长度调整，避免长短文档使用同一关键词数量。
+        // hash 通过引用参数写回；函数返回后保存正文对应的 64 位指纹。
+        hasher_.make(doc.content, simhash_top_n(doc.content), hash);
+
+        bool duplicated = false;
+        // 将当前指纹与此前保留的每篇文档逐一比较。该课程实现复杂度为 O(n^2)，
+        // 对给定离线语料规模足够直观；大规模数据可再使用分桶方法优化。
+        // uint64_t 固定为 64 位无符号整数，正好容纳完整 SimHash 指纹。
+        for (uint64_t oldHash : fingerprints) {
+            // 第三个参数明确指定阈值 3，即汉明距离 <= 3 视为重复。
+            if (simhash::Simhasher::isEqual(hash, oldHash, 3)) {
+                duplicated = true;
+                break;
+            }
+        }
+
+        if (!duplicated) {
+            // 保留首次出现的文档，后续近似重复文档被丢弃。
+            uniqueDocuments.push_back(doc);
+            fingerprints.push_back(hash);
+        }
+    }
+
+    // 阶段 2：swap 以常数复杂度交换两个 vector 的内部缓冲区。documents_
+    // 获得去重结果，旧原始文档随 uniqueDocuments 离开作用域自动释放。
+    documents_.swap(uniqueDocuments);
+
+    // 去重后重新编号，保证 id 连续，并且与 pages/offsets/invert_index 一致。
+    // vector 下标从 0 开始，而外部文档 id 按课程格式从 1 开始，所以赋值 i+1。
+    // static_cast 明确把 size_t 转成 int，与 Document::id 类型保持一致。
+    for (int i = 0; i < static_cast<int>(documents_.size()); ++i) {
+        documents_[i].id = i + 1;
+    }
+
+    std::cout << "[Page] unique documents: " << documents_.size() << std::endl;
+}
+
+/**
+ * @brief 写出网页库以及按字节定位每篇网页的偏移库。
+ * @param pages 网页库输出路径。
+ * @param offsets 偏移库输出路径。
+ * @throws std::runtime_error 任一输出文件无法打开时抛出。
+ */
+void PageProcessor::build_pages_and_offsets(const std::string& pages,
+                                            const std::string& offsets)
+{
+    // 阶段 1：以截断模式创建两个输出流。流对象离开函数时会自动 flush 和 close。
+    // 网页库用二进制模式打开，避免平台换行转换影响 tellp() 和实际写入字节数
+    // 的一致性。偏移库本身是按行读取的纯文本。
+    std::ofstream pageOfs(pages, std::ios::binary);
+    if (!pageOfs) {
+        throw std::runtime_error("failed to open pages file: " + pages);
+    }
+
+    std::ofstream offsetOfs(offsets);
+    if (!offsetOfs) {
+        throw std::runtime_error("failed to open offsets file: " + offsets);
+    }
+
+    for (const auto& doc : documents_) {
+        // 先在内存中序列化一篇完整文档，之后才能准确得到该文档占用的字节数。
+        // 对字段做 XML 转义，确保原正文中的标签字符不会破坏 pages.dat 结构。
+        // `<<` 连续返回同一个输出流引用，因此可以链式拼接多个字段。
+        std::ostringstream oss;
+        oss << "<doc>\n"
+            << "  <id>" << doc.id << "</id>\n"
+            << "  <link>" << TextUtils::escape_xml(doc.link) << "</link>\n"
+            << "  <title>" << TextUtils::escape_xml(doc.title) << "</title>\n"
+            << "  <content>" << TextUtils::escape_xml(doc.content) << "</content>\n"
+            << "</doc>\n";
+
+        std::string page = oss.str();
+        // tellp() 在写入前返回当前输出位置，也就是该文档的起始字节偏移。
+        // streamoff 是专门表示流位置差值的有符号类型，比 int 更适合大文件。
+        std::streamoff offset = pageOfs.tellp();
+
+        // write 执行非格式化二进制写入，不会把 '\n' 或正文内容再次转换。
+        // size_t 显式转为 streamsize，以匹配 write 的第二个参数类型。
+        pageOfs.write(page.data(), static_cast<std::streamsize>(page.size()));
+        // 偏移库格式：docId offset length。offset 和 length 都按字节计数，
+        // 二期可据此 seek 到指定位置并一次读取完整 <doc>。
+        offsetOfs << doc.id << ' ' << offset << ' ' << page.size() << '\n';
+    }
+}
+
+/**
+ * @brief 计算归一化 TF-IDF，并写出关键词到文档的倒排索引。
+ * @param filename 倒排索引输出路径。
+ * @throws std::runtime_error 输出文件无法打开时抛出。
+ * @throws utf8::exception 分词结果编码非法时可能抛出。
+ */
+void PageProcessor::build_inverted_index(const std::string& filename)
+{
+    // 阶段 1：清除旧索引并准备三类统计量。
+    // process 未来若重复调用，必须清除旧 posting list，避免混入上次结果。
+    invertedIndex_.clear();
+
+    // 第一步：统计每篇文档中每个词出现的次数。
+    // docTermCount[docId][word] = count
+    // 外层 key 是 docId，内层 key 是 word，内层 value 是当前文档中的出现次数。
+    std::map<int, std::map<std::string, int>> docTermCount;
+
+    // docTotalWords[docId] = 当前文档有效词总数，用于计算 TF。
+    std::map<int, int> docTotalWords;
+
+    // documentFrequency[word] = 有多少篇文档包含该词，用于计算 IDF。
+    std::map<std::string, int> documentFrequency;
+
+    // 阶段 2：逐文档分词，同时统计词频、有效词总数和文档频率。
+    for (const auto& doc : documents_) {
+        std::vector<std::string> words;
+        // 与中文词典建库一致，使用 Jieba 默认 Mix 模式切分网页正文。
+        tokenizer_.Cut(doc.content, words);
+
+        // DF 统计“包含该词的文档数”，同一词在一篇文档中无论出现多少次，
+        // 都只能贡献 1，因此使用 set 记录本篇出现过的词。
+        std::set<std::string> appearedInThisDoc;
+        for (const auto& word : words) {
+            // 停用词、空白、标点和纯数字不进入有效词总数，也不参与 TF-IDF。
+            if (stopWords_.count(word) != 0) {
+                continue;
+            }
+            if (TextUtils::is_useless_token(word)) {
+                continue;
+            }
+
+            // 连续两个 [] 分别访问外层 docId 和内层 word；不存在的映射会被
+            // 默认构造，int 初始为 0，随后通过 ++ 累计。
+            ++docTermCount[doc.id][word];
+            // TF 的分母是过滤后的有效 token 总数，不是原始分词数组长度。
+            ++docTotalWords[doc.id];
+            appearedInThisDoc.insert(word);
+        }
+
+        // 遍历 set 而非原 words，保证同一文档对每个词的 DF 只累加一次。
+        for (const auto& word : appearedInThisDoc) {
+            ++documentFrequency[word];
+        }
+    }
+
+    // 文档总数在 TF-IDF 计算期间保持不变，用 const 表达只读约束。
+    const int documentCount = static_cast<int>(documents_.size());
+
+    // 阶段 3：对每篇文档计算 TF-IDF，并按文档向量长度归一化。
+    for (const auto& [docId, terms] : docTermCount) {
+        // operator[] 读取已存在的 docId 总词数。前面的统计保证 terms 存在时
+        // 对应总词数也存在；防御性检查避免零分母。
+        if (docTotalWords[docId] == 0) {
+            continue;
+        }
+
+        // weights 是当前文档的临时正向权重向量：word -> 未归一化 TF-IDF。
+        std::map<std::string, double> weights;
+        double squareSum = 0.0;
+
+        for (const auto& [word, count] : terms) {
+            // PDF 公式：
+            // TF  = 当前词在文档中的次数 / 当前文档有效词总数
+            // IDF = log2(文档总数 / (包含该词的文档数 + 1))
+            // w   = TF * IDF
+            // static_cast<double> 使除法执行浮点运算；若保持 int 会发生整数截断。
+            double tf = static_cast<double>(count) / docTotalWords[docId];
+            double idf = std::log2(static_cast<double>(documentCount) / (documentFrequency[word] + 1));
+            double weight = tf * idf;
+
+            weights[word] = weight;
+            // 同步累计平方和，后续计算文档权重向量的 L2 范数。
+            squareSum += weight * weight;
+        }
+
+        // L2 范数为所有权重平方和的平方根。归一化后文档向量长度为 1，
+        // 便于二期直接使用余弦相似度比较文档和查询向量。
+        double norm = std::sqrt(squareSum);
+        // 当所有词的 IDF 都为 0 时，向量长度为 0，无法执行除法归一化。
+        if (norm == 0.0) {
+            continue;
+        }
+
+        for (const auto& [word, weight] : weights) {
+            // 把正向结构 docId -> word -> weight 反转为
+            // word -> docId -> normalizedWeight，便于二期按查询词快速找文档。
+            invertedIndex_[word][docId] = weight / norm;
+        }
+    }
+
+    // 输出格式：word docId weight [docId weight]...
+    // map 保证关键词和 docId 顺序稳定；固定 10 位小数减少序列化精度损失。
+    // 阶段 4：覆盖写出最终倒排索引。
+    std::ofstream ofs(filename);
+    if (!ofs) {
+        throw std::runtime_error("failed to open inverted index file: " + filename);
+    }
+
+    // std::fixed 和 setprecision 是流操纵器：组合后表示小数点后固定保留 10 位，
+    // 设置会持续作用于该输出流后续写入的所有浮点数。
+    ofs << std::fixed << std::setprecision(10);
+    for (const auto& [word, postingList] : invertedIndex_) {
+        ofs << word;
+        for (const auto& [docId, weight] : postingList) {
+            ofs << ' ' << docId << ' ' << weight;
+        }
+        ofs << '\n';
+    }
+
+    std::cout << "[Page] inverted index keywords: " << invertedIndex_.size() << std::endl;
+}
