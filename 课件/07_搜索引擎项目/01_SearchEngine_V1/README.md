@@ -63,8 +63,8 @@ invert_index=data/index/invert_index.dat
 1. 关键字推荐离线建库
    - 读取英文语料和英文停用词，生成 `data/dict/dict_en.dat`
    - 根据英文词典生成 `data/index/index_en.dat`
-   - 读取中文语料和中文停用词，生成 `data/dict/dict_cn.dat`
-   - 根据中文词典生成 `data/index/index_cn.dat`
+   - 读取中文语料和中文停用词，只保留纯汉字 token，生成 `data/dict/dict_cn.dat`
+   - 根据中文词典生成 `data/index/index_cn.dat`，索引 key 只包含完整 UTF-8 汉字
 
 2. 网页搜索离线建库
    - 读取 `data/corpus/webpages` 中的 XML 文件
@@ -120,6 +120,8 @@ data/index/offsets.dat
 data/index/invert_index.dat
 ```
 
+其中 `data/dict/dict_cn.dat` 是中文关键字推荐词典，只应包含全部由汉字组成的词语；英文、数字、标点、圈号数字、罗马数字、特殊符号和中英混合 token 会被过滤。英文候选词由 `data/dict/dict_en.dat` 单独负责，网页搜索倒排索引仍按网页内容分词结果构建。
+
 ## 代码阅读顺序
 
 建议按这个顺序学习：
@@ -139,11 +141,15 @@ data/index/invert_index.dat
 word frequency
 ```
 
+中文词典 `data/dict/dict_cn.dat` 的 `word` 应全部为汉字。如果文件前面出现英文或特殊符号，通常说明中文分词后的 token 过滤规则过宽，需要检查 `TextUtils::is_chinese_word()` 和 `KeywordProcessor::create_cn_dict()`。
+
 索引库：
 
 ```text
 character lineNo1 lineNo2 lineNo3 ...
 ```
+
+中文索引 `data/index/index_cn.dat` 的 `character` 应是单个完整 UTF-8 汉字。构建时要用 utfcpp 按 Unicode 字符切分，不能用 `word[i]` 按字节切分。
 
 网页偏移库：
 

@@ -52,7 +52,10 @@ public:
 
 private:
     /**
-     * @brief 对中文语料分词、过滤并统计词频，生成中文词典。
+     * @brief 对中文语料分词、过滤并统计词频，生成纯汉字中文词典。
+     *
+     * 仅保留全部 Unicode 码点均为汉字的 token，英文、数字、特殊符号及
+     * 中英混合 token 不进入中文词典。
      * @param dir 中文语料目录。
      * @param outfile 中文词典输出路径。
      * @throws std::runtime_error 目录、输入文件或输出文件不可用时抛出。

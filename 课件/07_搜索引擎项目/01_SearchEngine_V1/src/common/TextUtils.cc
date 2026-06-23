@@ -19,6 +19,39 @@ bool is_ascii_space_or_punct(unsigned char ch)
 {
     return std::isspace(ch) || std::ispunct(ch);
 }
+
+/**
+ * @brief 判断 Unicode 码点是否属于项目接受的汉字范围。
+ * @param codePoint 待检查的 Unicode 码点。
+ * @return 属于汉字相关区块时返回 true，否则返回 false。
+ * @note 异常处理：本函数只比较整数范围，不抛出异常。
+ */
+bool is_han_code_point(char32_t codePoint)
+{
+    // U+3007 是中文数字“〇”，它位于 CJK 符号和标点区，不在统一表意文字区。
+    if (codePoint == 0x3007) {
+        return true;
+    }
+
+    // 常用汉字主要位于扩展 A 和基本区，课程语料绝大多数命中这两个范围。
+    if ((codePoint >= 0x3400 && codePoint <= 0x4DBF)
+        || (codePoint >= 0x4E00 && codePoint <= 0x9FFF)
+        || (codePoint >= 0xF900 && codePoint <= 0xFAFF)) {
+        return true;
+    }
+
+    // 补充 Unicode 辅助平面中的 CJK 扩展 B-I 和兼容表意文字补充区，
+    // 避免生僻汉字及兼容字形被误删。
+    return (codePoint >= 0x20000 && codePoint <= 0x2A6DF)
+        || (codePoint >= 0x2A700 && codePoint <= 0x2B73F)
+        || (codePoint >= 0x2B740 && codePoint <= 0x2B81F)
+        || (codePoint >= 0x2B820 && codePoint <= 0x2CEAF)
+        || (codePoint >= 0x2CEB0 && codePoint <= 0x2EBEF)
+        || (codePoint >= 0x2EBF0 && codePoint <= 0x2EE5F)
+        || (codePoint >= 0x2F800 && codePoint <= 0x2FA1F)
+        || (codePoint >= 0x30000 && codePoint <= 0x3134F)
+        || (codePoint >= 0x31350 && codePoint <= 0x323AF);
+}
 }
 
 namespace TextUtils
@@ -146,6 +179,32 @@ bool is_useless_token(const std::string& token)
     }
 
     return !hasUsefulCharacter;
+}
+
+/**
+ * @brief 判断 UTF-8 token 是否非空且完全由汉字组成。
+ * @param token 待检查的 UTF-8 token。
+ * @return 全部码点都是汉字时返回 true，否则返回 false。
+ * @throws utf8::exception token 编码非法或截断时由 utfcpp 抛出。
+ */
+bool is_chinese_word(const std::string& token)
+{
+    if (token.empty()) {
+        return false;
+    }
+
+    // curr 是可移动的当前字节位置。utf8::next 每次返回一个完整 Unicode 码点，
+    // 并将 curr 移到下一个字符，因此不会把汉字的多个 UTF-8 字节分别判断。
+    const char* curr = token.c_str();
+    const char* end = curr + token.size();
+    while (curr != end) {
+        char32_t codePoint = static_cast<char32_t>(utf8::next(curr, end));
+        if (!is_han_code_point(codePoint)) {
+            return false;
+        }
+    }
+
+    return true;
 }
 
 /**

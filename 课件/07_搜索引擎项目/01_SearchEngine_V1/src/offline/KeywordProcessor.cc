@@ -180,7 +180,7 @@ void KeywordProcessor::build_en_index(const std::string& dict, const std::string
 }
 
 /**
- * @brief 使用 Jieba 切分中文语料并生成词频词典。
+ * @brief 使用 Jieba 切分中文语料并生成纯汉字词频词典。
  * @param dir 中文语料目录。
  * @param outfile 中文词典输出路径。
  * @throws std::runtime_error 目录无法扫描、语料无法读取或输出无法打开时抛出。
@@ -214,11 +214,12 @@ void KeywordProcessor::create_cn_dict(const std::string& dir, const std::string&
 
         // 阶段 2：过滤 Jieba 结果并累计有效 token 词频。
         for (const auto& word : words) {
-            // 先过滤停用词，再过滤空白、标点、纯数字等无检索价值的 token。
+            // 先过滤停用词，再只保留完全由汉字组成的 token。英文推荐已有独立词典，
+            // 若继续收录英文、圈号等内容，会污染中文字符索引和候选集合。
             if (cnStopWords_.count(word) != 0) {
                 continue;
             }
-            if (TextUtils::is_useless_token(word)) {
+            if (!TextUtils::is_chinese_word(word)) {
                 continue;
             }
             ++wordFrequency[word];
@@ -272,8 +273,9 @@ void KeywordProcessor::build_cn_index(const std::string& dict, const std::string
         // split_utf8_characters 返回临时 vector，其生命周期会延长到
         // 本次范围 for 循环结束；ch 通过常量引用绑定到其中的每个 UTF-8 字符串。
         for (const auto& ch : TextUtils::split_utf8_characters(word)) {
-            // 分词结果理论上已清洗，此处再次过滤可避免标点字符成为索引 key。
-            if (!TextUtils::is_useless_token(ch)) {
+            // 正常生成的中文词典已经是纯汉字；此处再次校验，使函数读取外部或
+            // 旧词典时也不会把英文字母、数字和特殊符号写入中文索引。
+            if (TextUtils::is_chinese_word(ch)) {
                 uniqueChars.insert(ch);
             }
         }

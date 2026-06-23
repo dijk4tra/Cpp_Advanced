@@ -55,6 +55,19 @@ std::vector<std::string> split_utf8_characters(const std::string& text);
 bool is_useless_token(const std::string& token);
 
 /**
+ * @brief 判断 token 是否为仅由汉字组成的中文词语。
+ *
+ * 函数按 Unicode 码点判断，而不是按 UTF-8 字节判断。支持基本中日韩统一表意
+ * 文字、扩展 A-I、兼容表意文字以及中文数字 `〇`。英文、数字、标点、圈号、
+ * 罗马数字和中英混合 token 均返回 false。
+ *
+ * @param token 待检查的 UTF-8 分词结果。
+ * @return token 非空且每个 Unicode 码点都是汉字时返回 true，否则返回 false。
+ * @throws utf8::exception token 不是合法 UTF-8 字符串时，由 utfcpp 抛出。
+ */
+bool is_chinese_word(const std::string& token);
+
+/**
  * @brief 转义 XML 文本节点中的特殊字符。
  *
  * 将 `&`、`<`、`>` 分别转换为对应实体，防止网页字段破坏 pages.dat 的标签
