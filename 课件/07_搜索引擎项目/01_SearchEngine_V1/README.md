@@ -22,6 +22,10 @@
 整体数据流如下：
 
 ```mermaid
+---
+config:
+  layout: elk
+---
 flowchart TD
     CFG[conf/config.conf] --> Main[offline_builder]
     Main --> KW[KeywordProcessor]
