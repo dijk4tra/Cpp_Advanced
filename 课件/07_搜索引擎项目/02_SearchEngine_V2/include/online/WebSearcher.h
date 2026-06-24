@@ -12,10 +12,16 @@
 
 /**
  * @brief 倒排索引中的一条 posting。
+ *
+ * 当前实际加载时为了查询方便使用 `word -> docId -> weight`，该结构保留了
+ * 传统 posting 的概念，便于阅读倒排索引相关代码和文档。
  */
 struct Posting
 {
+    // 包含该词的文档编号。
     int docId = 0;
+
+    // 该词在对应文档中的归一化 TF-IDF 权重。
     double weight = 0.0;
 };
 
@@ -25,6 +31,9 @@ struct Posting
  * 该模块加载一期生成的网页库、偏移库和倒排索引。查询时把用户输入看作一篇
  * 短文档，计算查询 TF-IDF 向量，再与候选网页的归一化 TF-IDF 权重做余弦
  * 相似度排序。
+ *
+ * 查询词 IDF 按本项目第二期约定从 posting list 长度推导 DF，再使用
+ * `IDF = log2(N / (DF + 1))` 计算。N 为网页库文档总数。
  */
 class WebSearcher
 {
@@ -63,18 +72,44 @@ public:
     std::string search_json(const std::string& query, int topK) const;
 
 private:
+    // docId -> normalized TF-IDF weight。倒排索引每个词对应一个 posting map。
     using PostingMap = std::unordered_map<int, double>;
 
+    /**
+     * @brief 加载 invert_index.dat。
+     * @param filename 倒排索引路径，每行格式为 `word docId weight ...`。
+     * @throws std::runtime_error 文件无法打开时抛出。
+     */
     void load_inverted_index(const std::string& filename);
+
+    /**
+     * @brief 使用 cppjieba 对查询语句分词并统计词频。
+     * @param query 用户原始查询语句。
+     * @return word -> 查询中出现次数。
+     */
     std::map<std::string, int> cut_query(const std::string& query) const;
+
+    /**
+     * @brief 根据查询词频计算归一化查询向量。
+     *
+     * 若任一查询词不在倒排索引中，说明不存在同时包含全部查询词的网页，直接
+     * 返回空向量。
+     */
     std::map<std::string, double> build_query_vector(const std::map<std::string, int>& termCount) const;
+
+    /**
+     * @brief 取所有查询词 posting list 的交集作为候选文档。
+     */
     std::set<int> find_candidate_docs(const std::map<std::string, double>& queryVector) const;
 
 private:
     // cppjieba 的初始化成本较高，作为成员在服务生命周期内复用。
     cppjieba::Jieba tokenizer_;
 
+    // 中文停用词集合，用于过滤查询中的高频低信息量词语。
     std::set<std::string> stopWords_;
+
+    // 已加载到内存的网页库和偏移库。
     PageLibrary pageLibrary_;
 
     // word -> docId -> normalized TF-IDF weight。

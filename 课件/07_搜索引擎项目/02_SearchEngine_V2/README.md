@@ -150,8 +150,8 @@ nlohmann/json
 
 ```bash
 cd 课件/07_搜索引擎项目/02_SearchEngine_V2
-cmake -S . -B build_v2
-cmake --build build_v2
+cmake -S . -B build
+cmake --build build
 ```
 
 构建完成后生成：
@@ -160,8 +160,6 @@ cmake --build build_v2
 bin/offline_builder
 bin/search_server
 ```
-
-如果复用旧 `build/` 目录时出现 CMake cache 指向其他源码目录的问题，可以使用新的构建目录，例如 `build_v2`。
 
 ### 3.3 运行离线建库
 
@@ -194,20 +192,29 @@ Output directories: data/dict, data/index
 1. 读取 `conf/config.conf`。
 2. 加载中英文词典和字符索引。
 3. 加载网页库、偏移库和倒排索引。
-4. 初始化 `muduo::net::TcpServer`。
-5. 监听配置中的地址和端口。
+4. 初始化原始 TCP/TLV 服务。
+5. 初始化浏览器 HTTP 服务。
+6. 同一个进程同时监听两个端口。
 
 默认监听：
 
 ```text
-0.0.0.0:8888
+0.0.0.0:8888    原始 TCP/TLV 服务
+0.0.0.0:18888   浏览器 HTTP 服务
 ```
 
 启动成功时会输出：
 
 ```text
 ========== SearchEngine V2 Online Server ==========
-[Online] listen on 0.0.0.0:8888
+[Online] TLV listen on 0.0.0.0:8888
+[Online] Web listen on http://0.0.0.0:18888
+```
+
+浏览器测试页面访问：
+
+```text
+http://127.0.0.1:18888
 ```
 
 ## 4. 配置文件
@@ -238,11 +245,14 @@ invert_index=data/index/invert_index.dat
 # Online server.
 server_ip=0.0.0.0
 server_port=8888
+http_port=18888
 io_threads=4
+http_threads=2
 max_message_size=1048576
 keyword_topk=5
 web_topk=10
 abstract_length=150
+www_root=www
 ```
 
 `Config` 解析规则：
@@ -256,7 +266,7 @@ abstract_length=150
 7. 同名 key 重复出现时，后面的配置覆盖前面的配置。
 8. `Config::get()` 查询不存在的 key 会抛异常。
 
-在线服务中，服务器端口、线程数、topK、摘要长度等在线配置提供默认值；离线数据路径是必需配置。
+在线服务中，服务器端口、线程数、topK、摘要长度、前端目录等在线配置提供默认值；离线数据路径是必需配置。
 
 ## 5. 第一阶段：离线建库
 
@@ -430,9 +440,19 @@ classDiagram
         +generate(content, keywords, length)
     }
 
+    class WebHttpServer {
+        -TcpServer server_
+        -wwwRoot_
+        +start()
+        -handle_static_file(...)
+        -handle_api(...)
+    }
+
     SearchServer --> ProtocolCodec
     SearchServer --> KeywordRecommender
     SearchServer --> WebSearcher
+    WebHttpServer --> KeywordRecommender
+    WebHttpServer --> WebSearcher
     WebSearcher --> PageLibrary
     WebSearcher --> DynamicAbstract
 ```
@@ -449,7 +469,14 @@ classDiagram
 4. 连接回调只打印连接和断开日志。
 5. 消息回调负责 TLV 解包、业务分发和响应发送。
 
-因为当前二期没有缓存，也没有查询时写共享状态，所以在线数据按只读方式被多个 IO 线程共享。
+`WebHttpServer` 同样基于 `muduo::net::TcpServer`，监听 `http_port`，负责浏览器页面和 HTTP API。因为当前二期没有缓存，也没有查询时写共享状态，所以在线数据按只读方式被 TLV 服务和 HTTP 服务共享。
+
+端口分工：
+
+```text
+8888   原始 TCP/TLV 服务，方便课程协议测试
+18888  浏览器 HTTP 服务，方便直接访问前端页面
+```
 
 ### 6.3 TLV 协议
 
@@ -725,7 +752,36 @@ flowchart TD
 <em>关键词</em>
 ```
 
-## 10. 网页库加载
+## 10. 浏览器前端和 HTTP 服务
+
+`www/` 目录保存浏览器测试页面。当前页面名称为 `Pandex`，页面主标题为 `关键字推荐&网页搜索`，视觉风格参考 `docs/01-minimalism.html`，采用白底黑字、细边框、充足留白的 minimalism / swiss 风格。
+
+```text
+www/
+├── index.html
+├── styles.css
+├── app.js
+└── README.md
+```
+
+`WebHttpServer` 监听 `http_port`，默认 `18888`。它在同一个 `search_server` 进程内完成两件事：
+
+1. 返回静态文件：`/`、`/index.html`、`/styles.css`、`/app.js`。
+2. 提供 HTTP API：`POST /api/suggest`、`POST /api/search`。
+
+HTTP API 不再通过 Python 代理，也不再转发到 TLV 端口，而是直接调用当前进程中的 `KeywordRecommender` 和 `WebSearcher`。这样启动时只需要运行一个程序：
+
+```bash
+./bin/search_server
+```
+
+浏览器访问：
+
+```text
+http://127.0.0.1:18888
+```
+
+## 11. 网页库加载
 
 `PageLibrary` 启动时加载 `offsets.dat` 和 `pages.dat`。
 
@@ -749,13 +805,13 @@ std::unordered_map<int, Document> documents_;
 
 查询时通过 `docId` 直接找到 `title`、`link` 和 `content`，避免每次搜索再读磁盘。
 
-## 11. 测试方式
+## 12. 测试方式
 
-### 11.1 编译验证
+### 12.1 编译验证
 
 ```bash
-cmake -S . -B build_v2
-cmake --build build_v2
+cmake -S . -B build
+cmake --build build
 ```
 
 预期两个目标都构建成功：
@@ -765,13 +821,45 @@ Built target offline_builder
 Built target search_server
 ```
 
-### 11.2 启动服务
+### 12.2 启动服务
 
 ```bash
 ./bin/search_server
 ```
 
-### 11.3 使用 Python 发送 TLV 请求
+启动后默认可访问：
+
+```text
+TLV:  127.0.0.1:8888
+HTTP: http://127.0.0.1:18888
+```
+
+### 12.3 浏览器测试
+
+打开：
+
+```text
+http://127.0.0.1:18888
+```
+
+页面提供两个模式：
+
+1. `网页搜索`
+2. `关键字推荐`
+
+### 12.4 HTTP API 测试
+
+```bash
+curl -s -X POST http://127.0.0.1:18888/api/suggest \
+  -H 'Content-Type: application/json' \
+  --data '{"query":"搜索","lang":"cn","topk":3}'
+
+curl -s -X POST http://127.0.0.1:18888/api/search \
+  -H 'Content-Type: application/json' \
+  --data '{"query":"汽车 召回","topk":2}'
+```
+
+### 12.5 使用 Python 发送 TLV 请求
 
 关键字推荐和网页搜索都可以用下面的脚本测试：
 
@@ -829,19 +917,19 @@ score
 
 其中 `abstract` 中会用 `<em>` 标记命中的查询词。
 
-## 12. 当前实现边界
+## 13. 当前实现边界
 
 当前第二期实现刻意保持简单，便于学习项目主线：
 
 1. 未实现缓存，缓存设计留到第三期。
-2. 未实现 HTTP，只提供 muduo TCP 服务。
+2. HTTP 服务只实现浏览器测试需要的 GET 静态文件和 POST API，不作为通用 Web 框架。
 3. TLV 的 value 使用 JSON，但外层协议是自定义二进制协议。
 4. 网页召回严格要求包含所有查询词；没有做降级召回。
 5. 网页搜索使用 TF-IDF 和余弦相似度，没有引入 BM25。
 6. 动态摘要做轻量 HTML 清理，不实现完整 HTML 解析器。
 7. 在线数据启动时一次性加载到内存，适合当前课程语料规模。
 
-## 13. 关键源码入口
+## 14. 关键源码入口
 
 | 功能 | 文件 |
 | --- | --- |
@@ -853,12 +941,13 @@ score
 | 网页离线建库 | `src/offline/PageProcessor.cc` |
 | TLV 协议 | `src/online/ProtocolCodec.cc` |
 | muduo 服务 | `src/online/SearchServer.cc` |
+| 浏览器 HTTP 服务 | `src/online/WebHttpServer.cc` |
 | 在线关键字推荐 | `src/online/KeywordRecommender.cc` |
 | 在线网页搜索 | `src/online/WebSearcher.cc` |
 | 网页库加载 | `src/online/PageLibrary.cc` |
 | 动态摘要 | `src/online/DynamicAbstract.cc` |
 
-## 14. 总结
+## 15. 总结
 
 当前 V2 项目已经形成完整的“离线建库 + 在线查询”结构：
 

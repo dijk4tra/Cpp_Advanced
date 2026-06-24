@@ -7,7 +7,11 @@
  * @brief 根据查询关键词从网页正文生成动态摘要。
  *
  * 动态摘要会优先选择包含查询词、位置更重要且关键词更集中的正文窗口。位置
- * 权重按照文档开发思路规定：开头 1.30，结尾 1.15，中间 1.00。
+ * 权重按照文档开发思路规定：开头 1.30，结尾 1.15，中间 1.00。生成出的
+ * 摘要不是离线预先保存的固定内容，而是针对本次查询临时计算，因此同一篇
+ * 网页面对不同关键词时可以返回不同摘要。
+ *
+ * 该类不保存任何状态，只提供静态函数；调用方可以在多个查询线程中并发使用。
  */
 class DynamicAbstract
 {
@@ -19,6 +23,7 @@ public:
      * @param keywords 查询关键词列表。
      * @param abstractLength 摘要字符数上限。
      * @return 带 <em> 高亮标签的摘要文本。
+     * @throws utf8::exception content 或 keywords 中存在非法 UTF-8 时可能抛出。
      */
     static std::string generate(const std::string& content,
                                 const std::vector<std::string>& keywords,

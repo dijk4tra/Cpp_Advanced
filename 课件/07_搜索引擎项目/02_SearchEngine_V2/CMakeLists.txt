@@ -49,6 +49,7 @@ add_executable(search_server
     src/online/PageLibrary.cc
     src/online/DynamicAbstract.cc
     src/online/WebSearcher.cc
+    src/online/WebHttpServer.cc
 )
 
 # 查找 tinyxml2 库

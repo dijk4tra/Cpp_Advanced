@@ -16,13 +16,19 @@ namespace
  *
  * 只要包含一个非 ASCII 字节，就按中文处理。课程数据主要区分中文语料和英文
  * 语料，这个简单规则足够直观，也避免引入额外语言识别逻辑。
+ *
+ * @param query 用户输入。
+ * @param lang 请求中显式传入的语言类型。
+ * @return "cn" 或 "en"。
  */
 std::string normalize_lang(const std::string& query, const std::string& lang)
 {
+    // 如果客户端已经明确指定 "cn" 或 "en"，优先尊重客户端选择。
     if (lang == "cn" || lang == "en") {
         return lang;
     }
 
+    // UTF-8 中文字符一定包含高位字节，因此看到非 ASCII 字节即可按中文处理。
     for (unsigned char ch : query) {
         if (ch >= 0x80) {
             return "cn";
@@ -31,24 +37,43 @@ std::string normalize_lang(const std::string& query, const std::string& lang)
     return "en";
 }
 
+/**
+ * @brief 将英文查询拆成去重后的小写字母集合。
+ *
+ * 英文推荐的一期索引是按字符建立的，因此在线召回也只需要查询中出现过的字母。
+ *
+ * @param query 用户原始输入。
+ * @return 去重且按字母序排列的字符列表。
+ */
 std::vector<std::string> split_english_characters(const std::string& query)
 {
     std::string normalized = TextUtils::normalize_english_line(query);
     std::vector<std::string> characters;
     std::set<char> uniqueChars;
 
+    // normalize_english_line 已经把非字母转为空格，并把大写字母转成小写。
     for (char ch : normalized) {
         if (ch >= 'a' && ch <= 'z') {
             uniqueChars.insert(ch);
         }
     }
 
+    // set 让字符天然去重且有序，结果稳定，便于测试和复现。
     for (char ch : uniqueChars) {
         characters.emplace_back(1, ch);
     }
     return characters;
 }
 
+/**
+ * @brief 将一个词拆成编辑距离算法使用的基本单位。
+ *
+ * 英文按单字母计算；中文按完整 UTF-8 字符计算，不能按字节拆分。
+ *
+ * @param word 待拆分词语。
+ * @param lang 已归一化语言类型。
+ * @return 编辑距离 DP 使用的 token 序列。
+ */
 std::vector<std::string> split_word(const std::string& word, const std::string& lang)
 {
     if (lang == "en") {
@@ -64,21 +89,32 @@ std::vector<std::string> split_word(const std::string& word, const std::string& 
 }
 }
 
+/**
+ * @brief 加载关键字推荐所需的全部离线数据。
+ * @throws std::runtime_error 任一词典或索引文件无法打开时抛出。
+ */
 void KeywordRecommender::load(const std::string& cnDict,
                               const std::string& cnIndex,
                               const std::string& enDict,
                               const std::string& enIndex)
 {
+    // 加载顺序没有业务依赖，但保持“中文词典、中文索引、英文词典、英文索引”
+    // 与配置文件顺序一致，启动报错时更容易定位。
     load_dict(cnDict, cnDict_);
     load_index(cnIndex, cnIndex_);
     load_dict(enDict, enDict_);
     load_index(enIndex, enIndex_);
 }
 
+/**
+ * @brief 根据查询词生成推荐结果 JSON。
+ * @throws utf8::exception 中文输入或词典项编码非法时可能抛出。
+ */
 std::string KeywordRecommender::recommend_json(const std::string& query,
                                                const std::string& lang,
                                                int topK) const
 {
+    // lang 允许为空，由 normalize_lang 根据查询内容自动推断。
     std::string realLang = normalize_lang(query, lang);
     topK = topK <= 0 ? 5 : topK;
 
@@ -90,6 +126,7 @@ std::string KeywordRecommender::recommend_json(const std::string& query,
 
     std::vector<std::string> characters = split_query(query, realLang);
     if (characters.empty()) {
+        // 没有可用于召回的字符时返回空 results，而不是报错，前端更容易处理。
         return response.dump();
     }
 
@@ -114,6 +151,8 @@ std::string KeywordRecommender::recommend_json(const std::string& query,
 
     std::vector<Candidate> candidates;
     for (int lineNo : candidateLines) {
+        // 词典第 0 项是占位记录，有效 lineNo 从 1 开始；索引文件如果出现异常
+        // 行号，这里直接跳过。
         if (lineNo <= 0 || lineNo >= static_cast<int>(dict.size())) {
             continue;
         }
@@ -124,6 +163,10 @@ std::string KeywordRecommender::recommend_json(const std::string& query,
                               edit_distance(query, entry.word, realLang)});
     }
 
+    // 排序规则与推荐算法一致：
+    // 1. 编辑距离越小越相近；
+    // 2. 距离相同，词频越高越常用；
+    // 3. 前两者相同，用字典序保证结果稳定。
     std::sort(candidates.begin(), candidates.end(), [](const Candidate& lhs, const Candidate& rhs) {
         if (lhs.distance != rhs.distance) {
             return lhs.distance < rhs.distance;
@@ -146,6 +189,12 @@ std::string KeywordRecommender::recommend_json(const std::string& query,
     return response.dump();
 }
 
+/**
+ * @brief 加载一期生成的词典文件。
+ * @param filename 词典路径。
+ * @param dict 输出词典。
+ * @throws std::runtime_error 文件无法打开时抛出。
+ */
 void KeywordRecommender::load_dict(const std::string& filename, std::vector<DictEntry>& dict)
 {
     std::ifstream ifs(filename);
@@ -158,11 +207,18 @@ void KeywordRecommender::load_dict(const std::string& filename, std::vector<Dict
 
     std::string word;
     int frequency = 0;
+    // 词典文件每行是 `word frequency`。operator>> 自动按空白分隔读取。
     while (ifs >> word >> frequency) {
         dict.push_back({word, frequency});
     }
 }
 
+/**
+ * @brief 加载字符到词典行号的索引。
+ * @param filename 索引文件路径。
+ * @param index 输出索引。
+ * @throws std::runtime_error 文件无法打开时抛出。
+ */
 void KeywordRecommender::load_index(const std::string& filename, CharIndex& index)
 {
     std::ifstream ifs(filename);
@@ -175,6 +231,7 @@ void KeywordRecommender::load_index(const std::string& filename, CharIndex& inde
     while (std::getline(ifs, line)) {
         std::istringstream iss(line);
         std::string character;
+        // 每行第一个字段是字符，后续字段是包含该字符的词典行号。
         iss >> character;
         if (character.empty()) {
             continue;
@@ -187,6 +244,9 @@ void KeywordRecommender::load_index(const std::string& filename, CharIndex& inde
     }
 }
 
+/**
+ * @brief 拆分查询词，得到用于字符索引召回的去重字符。
+ */
 std::vector<std::string> KeywordRecommender::split_query(const std::string& query,
                                                          const std::string& lang)
 {
@@ -196,6 +256,7 @@ std::vector<std::string> KeywordRecommender::split_query(const std::string& quer
 
     std::vector<std::string> result;
     std::set<std::string> uniqueChars;
+    // 中文只保留真正的汉字字符，标点、数字、英文字母不参与中文词典召回。
     for (const auto& ch : TextUtils::split_utf8_characters(query)) {
         if (TextUtils::is_chinese_word(ch)) {
             uniqueChars.insert(ch);
@@ -206,6 +267,11 @@ std::vector<std::string> KeywordRecommender::split_query(const std::string& quer
     return result;
 }
 
+/**
+ * @brief 使用动态规划计算编辑距离。
+ *
+ * dp[i][j] 表示 lhs 前 i 个单位变成 rhs 前 j 个单位所需的最少操作数。
+ */
 int KeywordRecommender::edit_distance(const std::string& lhs,
                                       const std::string& rhs,
                                       const std::string& lang)
@@ -213,6 +279,8 @@ int KeywordRecommender::edit_distance(const std::string& lhs,
     std::vector<std::string> left = split_word(lhs, lang);
     std::vector<std::string> right = split_word(rhs, lang);
 
+    // 多开一行一列用于表示空串。dp[0][j] 是空串插入 j 个字符的代价；
+    // dp[i][0] 是删除 i 个字符的代价。
     std::vector<std::vector<int>> dp(left.size() + 1,
                                      std::vector<int>(right.size() + 1, 0));
 
@@ -226,8 +294,10 @@ int KeywordRecommender::edit_distance(const std::string& lhs,
     for (std::size_t i = 1; i <= left.size(); ++i) {
         for (std::size_t j = 1; j <= right.size(); ++j) {
             if (left[i - 1] == right[j - 1]) {
+                // 当前字符相同，不需要额外操作。
                 dp[i][j] = dp[i - 1][j - 1];
             } else {
+                // 三种选择分别对应删除、插入、替换，取最小值。
                 dp[i][j] = std::min({dp[i - 1][j] + 1,
                                      dp[i][j - 1] + 1,
                                      dp[i - 1][j - 1] + 1});

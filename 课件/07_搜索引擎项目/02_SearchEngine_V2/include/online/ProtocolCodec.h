@@ -19,7 +19,10 @@ class Buffer;
  */
 struct Request
 {
+    // 业务类型：1 表示关键字推荐，2 表示网页搜索。
     uint8_t type = 0;
+
+    // TLV 中的 value 部分，约定保存 JSON 字符串。
     std::string value;
 };
 
@@ -29,6 +32,9 @@ struct Request
  * 协议格式固定为：1 字节 type + 4 字节网络序 length + length 字节 value。
  * 该类不保存状态，只负责从 muduo Buffer 中按消息边界读取数据，以及把 JSON
  * 响应封装回同样的 TLV 字节串。
+ *
+ * TCP 本身没有消息边界，try_decode() 的返回值用于告诉上层当前 Buffer 中是否
+ * 已经凑齐一条完整消息；数据不足时不会消耗 Buffer。
  */
 class ProtocolCodec
 {
