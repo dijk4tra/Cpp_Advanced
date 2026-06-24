@@ -2,7 +2,7 @@
 cmake_minimum_required(VERSION 3.16)
 
 # 项目名称和语言(其中 CXX 表示 C++)
-project(SearchEngineV1 LANGUAGES CXX)
+project(SearchEngineV2 LANGUAGES CXX)
 
 # 指定项目使用 C++17 标准
 set(CMAKE_CXX_STANDARD 17)
@@ -38,8 +38,25 @@ add_executable(offline_builder
     src/offline/PageProcessor.cc
 )
 
+# 定义第二期在线服务目标。它复用 common 模块，并加载第一期生成的数据文件。
+add_executable(search_server
+    src/online/online_main.cc
+    src/common/Config.cc
+    src/common/TextUtils.cc
+    src/online/ProtocolCodec.cc
+    src/online/SearchServer.cc
+    src/online/KeywordRecommender.cc
+    src/online/PageLibrary.cc
+    src/online/DynamicAbstract.cc
+    src/online/WebSearcher.cc
+)
+
 # 查找 tinyxml2 库
 find_library(TINYXML2_LIB tinyxml2)
+
+# 查找 muduo 网络库。muduo_net 依赖 muduo_base，最终还需要 pthread。
+find_library(MUDUO_NET_LIB muduo_net)
+find_library(MUDUO_BASE_LIB muduo_base)
 
 # 判断 tinyxml2 库是否查找成功
 if (TINYXML2_LIB)
@@ -61,6 +78,7 @@ if (TINYXML2_LIB)
     # 对于可执行文件来说，通常使用 PRIVATE 即可。
 
     target_link_libraries(offline_builder PRIVATE ${TINYXML2_LIB})
+    target_link_libraries(search_server PRIVATE ${TINYXML2_LIB})
 
     # 手写 g++ 命令里的 -lpthread、-ltinyxml2、-lmysqlclient、-lssl、-lcrypto
     # 在 CMakeLists.txt 中主要通过 target_link_libraries 来添加。
@@ -70,4 +88,10 @@ else()
     # message(FATAL_ERROR "...") 表示输出错误信息并终止配置过程
     message(FATAL_ERROR "tinyxml2 library not found. Please install libtinyxml2-dev or add tinyxml2.cpp manually.")
 
+endif()
+
+if (MUDUO_NET_LIB AND MUDUO_BASE_LIB)
+    target_link_libraries(search_server PRIVATE ${MUDUO_NET_LIB} ${MUDUO_BASE_LIB} pthread)
+else()
+    message(FATAL_ERROR "muduo library not found. Please install muduo_net and muduo_base.")
 endif()
