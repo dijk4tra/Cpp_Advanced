@@ -8,6 +8,8 @@
 #include <functional>
 #include <nlohmann/json.hpp>
 
+// 让 std::bind 中可以直接使用 _1、_2、_3。
+// 这些占位符表示 muduo 调用回调时传进来的第 1、第 2、第 3 个实参。
 using namespace std::placeholders;
 
 namespace
@@ -17,6 +19,7 @@ namespace
 constexpr uint8_t kKeywordRequest = 1;
 constexpr uint8_t kWebRequest = 2;
 constexpr uint8_t kErrorResponse = 100;
+// constexpr 表示编译期常量，协议类型在运行时不会被修改。
 }
 
 /**
@@ -30,7 +33,10 @@ SearchServer::SearchServer(muduo::net::EventLoop* loop,
                            uint32_t maxMessageSize,
                            int keywordTopK,
                            int webTopK)
+    // 成员初始化列表会在进入构造函数函数体之前初始化成员。
+    // server_ 没有默认构造后再设置监听地址的过程，因此必须在这里直接构造。
     : server_(loop, listenAddr, "SearchServer")
+    // recommender_ 和 searcher_ 是引用成员，引用成员也必须在初始化列表中绑定。
     , recommender_(recommender)
     , searcher_(searcher)
     , maxMessageSize_(maxMessageSize)
@@ -39,6 +45,7 @@ SearchServer::SearchServer(muduo::net::EventLoop* loop,
 {
     // std::bind 把成员函数绑定到当前对象。_1/_2/_3 是占位符，由 muduo 在回调
     // 发生时传入实际连接、缓冲区和时间戳。
+    // 成员函数自带一个隐藏的 this 指针，因此绑定时必须把 this 也传进去。
     server_.setConnectionCallback(std::bind(&SearchServer::on_connection, this, _1));
     server_.setMessageCallback(std::bind(&SearchServer::on_message, this, _1, _2, _3));
     // 线程数来自配置文件。第二期未引入缓存，各线程只读共享业务数据。
@@ -50,6 +57,7 @@ SearchServer::SearchServer(muduo::net::EventLoop* loop,
  */
 void SearchServer::start()
 {
+    // start() 只是开始监听并准备接受连接，真正的事件处理发生在 main 中的 loop.loop()。
     server_.start();
 }
 
@@ -58,6 +66,7 @@ void SearchServer::start()
  */
 void SearchServer::on_connection(const muduo::net::TcpConnectionPtr& conn)
 {
+    // TcpConnectionPtr 是 muduo 定义的智能指针，连接对象由 muduo 管理生命周期。
     if (conn->connected()) {
         LOG_INFO << "client connected: " << conn->peerAddress().toIpPort();
     } else {
@@ -77,9 +86,12 @@ void SearchServer::on_message(const muduo::net::TcpConnectionPtr& conn,
 {
     try {
         Request request;
+        // while 循环用于处理粘包：一次 on_message 可能已经收到了多条完整 TLV。
         while (ProtocolCodec::try_decode(buffer, request, maxMessageSize_)) {
+            // 默认响应类型与请求类型相同；如果业务层发现错误，会通过引用参数改成 100。
             uint8_t responseType = request.type;
             std::string response = handle_request(request.type, request.value, responseType);
+            // 业务层只返回 JSON 字符串，发送前仍需重新封装成 TLV。
             conn->send(ProtocolCodec::encode(responseType, response));
         }
     } catch (const std::exception& ex) {
@@ -93,7 +105,9 @@ void SearchServer::on_message(const muduo::net::TcpConnectionPtr& conn,
  */
 std::string SearchServer::handle_request(uint8_t type, const std::string& value, uint8_t& responseType)
 {
+    // parse 会把请求体字符串解析成 JSON 对象；格式错误时抛异常，由 on_message 捕获。
     nlohmann::json request = nlohmann::json::parse(value);
+    // value("query", "") 表示读取 query 字段；字段不存在时使用默认空字符串。
     std::string query = request.value("query", "");
     if (query.empty()) {
         responseType = kErrorResponse;
@@ -103,6 +117,7 @@ std::string SearchServer::handle_request(uint8_t type, const std::string& value,
     if (type == kKeywordRequest) {
         // 关键字推荐支持 lang，可显式指定 cn/en，也可留空由推荐模块自动判断。
         std::string lang = request.value("lang", "");
+        // 请求中没有 topk 时使用配置文件中的默认值 keywordTopK_。
         int topK = request.value("topk", keywordTopK_);
         return recommender_.recommend_json(query, lang, topK);
     }
@@ -123,6 +138,7 @@ std::string SearchServer::handle_request(uint8_t type, const std::string& value,
 std::string SearchServer::make_error(const std::string& message) const
 {
     nlohmann::json response;
+    // 错误响应保持统一字段，客户端只要判断是否存在 error 即可识别失败。
     response["error"] = "invalid request";
     response["message"] = message;
     return response.dump();

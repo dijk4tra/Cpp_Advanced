@@ -20,9 +20,33 @@ add_executable(offline_builder
     src/offline/PageProcessor.cc
 )
 
+add_executable(search_server
+    src/online/online_main.cc
+    src/common/Config.cc
+    src/common/TextUtils.cc
+    src/online/ProtocolCodec.cc
+    src/online/SearchServer.cc
+    src/online/KeywordRecommender.cc
+    src/online/PageLibrary.cc
+    src/online/DynamicAbstract.cc
+    src/online/WebSearcher.cc
+    src/online/WebHttpServer.cc
+)
+
 find_library(TINYXML2_LIB tinyxml2)
+find_library(MUDUO_NET_LIB muduo_net)
+find_library(MUDUO_BASE_LIB muduo_base)
+
+
 if (TINYXML2_LIB)
     target_link_libraries(offline_builder ${TINYXML2_LIB})
+    target_link_libraries(search_server PRIVATE ${TINYXML2_LIB})
 else()
     message(FATAL_ERROR "tinyxml2 library not found. Please install libtinyxml2-dev or add tinyxml2.cpp manually.")
 endif()
+
+if (MUDUO_NET_LIB AND MUDUO_BASE_LIB)
+    target_link_libraries(search_server PRIVATE ${MUDUO_NET_LIB} ${MUDUO_BASE_LIB} pthread)
+else()
+    message(FATAL_ERROR "muduo library not found. Please install muduo_net and muduo_base.")
+endif())

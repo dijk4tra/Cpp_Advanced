@@ -14,6 +14,8 @@
  * @brief 构造网页搜索器并初始化 cppjieba。
  */
 WebSearcher::WebSearcher()
+    // tokenizer_ 是 cppjieba::Jieba 对象，构造时会加载分词词典。
+    // 放在成员初始化列表中，保证对象创建时分词器就已经可用。
     : tokenizer_()
 {
 }
@@ -28,6 +30,7 @@ void WebSearcher::load(const std::string& pages,
 {
     // 加载顺序：停用词用于查询分词过滤；网页库用于结果展示；倒排索引用于召回
     // 和打分。三者都在服务启动阶段一次性加载完成。
+    // 启动阶段加载失败直接抛异常，避免服务器带着不完整索引继续运行。
     stopWords_ = TextUtils::load_stop_words(stopWords);
     pageLibrary_.load(pages, offsets);
     load_inverted_index(invertIndex);
@@ -38,6 +41,7 @@ void WebSearcher::load(const std::string& pages,
  */
 void WebSearcher::set_abstract_length(int length)
 {
+    // 摘要长度必须为正数；非法配置统一回退到 150，保持结果可读。
     abstractLength_ = length > 0 ? length : 150;
 }
 
@@ -49,27 +53,32 @@ std::string WebSearcher::search_json(const std::string& query, int topK) const
     topK = topK <= 0 ? 10 : topK;
 
     nlohmann::json response;
+    // 即使没有搜索结果，也返回固定 JSON 结构，前端可以统一读取 results 数组。
     response["type"] = "web";
     response["query"] = query;
     response["results"] = nlohmann::json::array();
 
+    // 第一步：分词并统计查询词频，得到查询 TF 的基础数据。
     std::map<std::string, int> termCount = cut_query(query);
     if (termCount.empty()) {
         // 查询被分词和过滤后没有有效词，返回空结果。
         return response.dump();
     }
 
+    // 第二步：把查询词频转成归一化 TF-IDF 向量。
     std::map<std::string, double> queryVector = build_query_vector(termCount);
     if (queryVector.empty()) {
         // 任一查询词不在倒排索引中，或向量无法归一化时都没有候选结果。
         return response.dump();
     }
 
+    // 第三步：取所有查询词 posting list 的交集，得到候选文档集合。
     std::set<int> candidateDocs = find_candidate_docs(queryVector);
     if (candidateDocs.empty()) {
         return response.dump();
     }
 
+    // 局部结构体只保存排序需要的字段，真正展示信息稍后再从 PageLibrary 查询。
     struct SearchResult {
         int docId = 0;
         double score = 0.0;
@@ -81,6 +90,8 @@ std::string WebSearcher::search_json(const std::string& query, int topK) const
 
         // 文档向量在一期已经按 L2 范数归一化。查询向量在 build_query_vector()
         // 中也已归一化，因此余弦相似度可直接按点积计算。
+        // structured binding 写法 `const auto& [word, queryWeight]` 可以把 map 的
+        // key/value 拆成两个变量名，代码比 first/second 更直观。
         for (const auto& [word, queryWeight] : queryVector) {
             auto wordIt = invertedIndex_.find(word);
             if (wordIt == invertedIndex_.end()) {
@@ -88,14 +99,17 @@ std::string WebSearcher::search_json(const std::string& query, int topK) const
             }
             auto docIt = wordIt->second.find(docId);
             if (docIt != wordIt->second.end()) {
+                // 点积公式：score += 查询词权重 * 文档中该词权重。
                 score += queryWeight * docIt->second;
             }
         }
 
+        // 使用列表初始化构造 SearchResult。
         results.push_back({docId, score});
     }
 
     // 分数高的排在前面；分数相同按 docId 升序，保证结果稳定。
+    // sort 只改变 vector 中元素顺序，不改变 SearchResult 内容。
     std::sort(results.begin(), results.end(), [](const SearchResult& lhs, const SearchResult& rhs) {
         if (lhs.score != rhs.score) {
             return lhs.score > rhs.score;
@@ -109,6 +123,7 @@ std::string WebSearcher::search_json(const std::string& query, int topK) const
         keywords.push_back(word);
     }
 
+    // topK 可能大于实际结果数，取二者较小值避免数组越界。
     int count = std::min(topK, static_cast<int>(results.size()));
     for (int i = 0; i < count; ++i) {
         const Document* doc = pageLibrary_.find(results[i].docId);
@@ -116,6 +131,7 @@ std::string WebSearcher::search_json(const std::string& query, int topK) const
             continue;
         }
 
+        // initializer list 构造一个 JSON object，再追加到 results 数组中。
         response["results"].push_back({
             {"id", doc->id},
             {"title", doc->title},
@@ -142,6 +158,7 @@ void WebSearcher::load_inverted_index(const std::string& filename)
     invertedIndex_.clear();
 
     std::string line;
+    // 倒排索引每一行长度不固定，getline 先拿到整行，再用 istringstream 逐项解析。
     while (std::getline(ifs, line)) {
         std::istringstream iss(line);
         std::string word;
@@ -153,8 +170,10 @@ void WebSearcher::load_inverted_index(const std::string& filename)
 
         int docId = 0;
         double weight = 0.0;
+        // 一行中可能有多个 docId/weight 对，循环读到本行结束为止。
         while (iss >> docId >> weight) {
             // 离线阶段已经对文档 TF-IDF 向量做过 L2 归一化，weight 可直接用于点积。
+            // invertedIndex_[word] 不存在时会自动创建一个空 PostingMap。
             invertedIndex_[word][docId] = weight;
         }
     }
@@ -166,6 +185,7 @@ void WebSearcher::load_inverted_index(const std::string& filename)
 std::map<std::string, int> WebSearcher::cut_query(const std::string& query) const
 {
     std::vector<std::string> words;
+    // cppjieba 将中文查询切成词语，结果写入 words 输出参数。
     tokenizer_.Cut(query, words);
 
     std::map<std::string, int> termCount;
@@ -177,6 +197,7 @@ std::map<std::string, int> WebSearcher::cut_query(const std::string& query) cons
         if (TextUtils::is_useless_token(word)) {
             continue;
         }
+        // map 的 operator[] 在 word 不存在时会插入默认值 0，然后 ++ 变成 1。
         ++termCount[word];
     }
 
@@ -191,10 +212,12 @@ std::map<std::string, double> WebSearcher::build_query_vector(const std::map<std
     std::map<std::string, double> queryVector;
     double squareSum = 0.0;
     int totalWords = 0;
+    // 先统计查询中的有效词总数，用于计算 TF。
     for (const auto& [word, count] : termCount) {
         totalWords += count;
     }
 
+    // pageLibrary_.size() 是 size_t，转成 double 后参与 IDF 的浮点计算。
     const double documentCount = static_cast<double>(pageLibrary_.size());
     if (totalWords == 0 || documentCount == 0.0) {
         return queryVector;
@@ -210,11 +233,13 @@ std::map<std::string, double> WebSearcher::build_query_vector(const std::map<std
 
         // 查询 TF 使用词频 / 查询有效词总数。DF 由 posting list 长度推导，
         // IDF 按第二期要求使用 log2(N / (DF + 1))。
+        // count 和 totalWords 都是整数，需要转成 double，否则会发生整数除法。
         double tf = static_cast<double>(count) / totalWords;
         double df = static_cast<double>(it->second.size());
         double idf = std::log2(documentCount / (df + 1.0));
         double weight = tf * idf;
         queryVector[word] = weight;
+        // squareSum 是向量每个维度权重平方和，后面开方得到 L2 范数。
         squareSum += weight * weight;
     }
 
@@ -225,6 +250,7 @@ std::map<std::string, double> WebSearcher::build_query_vector(const std::map<std
 
     // 归一化后，查询向量和文档向量的余弦相似度可直接用点积计算。
     for (auto& [word, weight] : queryVector) {
+        // auto& 允许直接修改 map 中保存的 weight。
         weight /= norm;
     }
     return queryVector;
@@ -246,6 +272,7 @@ std::set<int> WebSearcher::find_candidate_docs(const std::map<std::string, doubl
 
         std::set<int> currentDocs;
         for (const auto& [docId, docWeight] : wordIt->second) {
+            // 当前词的 posting map 中，每个 key 就是一篇包含该词的文档。
             currentDocs.insert(docId);
         }
 
@@ -258,6 +285,8 @@ std::set<int> WebSearcher::find_candidate_docs(const std::map<std::string, doubl
 
         // 后续每个词都与当前候选集合求交集，最终只保留同时包含所有查询词的文档。
         std::set<int> intersection;
+        // set_intersection 要求输入区间有序。std::set 天然有序，正好满足要求。
+        // inserter 会把交集结果不断插入 intersection。
         std::set_intersection(candidates.begin(), candidates.end(),
                               currentDocs.begin(), currentDocs.end(),
                               std::inserter(intersection, intersection.begin()));
