@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Pandex - SearchEngine</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <main class="app-shell">
+        <header class="topbar">
+            <div>
+                <p class="eyebrow">SearchEngine</p>
+                <h1>Pandex</h1>
+            </div>
+            <div class="status-strip" aria-label="搜索状态">
+                <div class="status-item status-state" id="serverState">
+                    <span class="status-label">Status</span>
+                    <span class="status-value">
+                        <span class="state-dot"></span>
+                        <strong>Idle</strong>
+                    </span>
+                </div>
+                <div class="status-item">
+                    <span class="status-label">Results</span>
+                    <strong id="resultCount">0</strong>
+                </div>
+                <div class="status-item">
+                    <span class="status-label">Time</span>
+                    <strong id="elapsedTime">-</strong>
+                </div>
+            </div>
+        </header>
+
+        <section class="search-panel">
+            <form id="searchForm" class="search-form">
+                <div class="search-row">
+                    <div class="search-box">
+                        <input id="queryInput"
+                               class="query-input"
+                               type="search"
+                               autocomplete="off"
+                               placeholder="输入查询词"
+                               aria-autocomplete="list"
+                               aria-controls="suggestions"
+                               aria-expanded="false"
+                               autofocus>
+                        <div id="suggestions" class="suggestions hidden" role="listbox"></div>
+                    </div>
+                    <button class="search-button" type="submit">
+                        <span class="button-icon" aria-hidden="true">⌕</span>
+                        <span>搜索</span>
+                    </button>
+                </div>
+            </form>
+        </section>
+
+        <section class="content-grid">
+            <section class="results-panel">
+                <div class="results-head">
+                    <h2 id="resultsTitle">查询结果</h2>
+                    <button id="clearButton" class="ghost-button" type="button">清空</button>
+                </div>
+                <div id="results" class="results empty-state">
+                    <div class="empty-mark">⌁</div>
+                    <p>暂无结果</p>
+                </div>
+            </section>
+        </section>
+    </main>
+
+    <script src="app.js"></script>
+</body>
+</html>
