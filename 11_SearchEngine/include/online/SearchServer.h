@@ -30,8 +30,8 @@ public:
      * @param searcher 网页搜索模块引用，生命周期必须长于 SearchServer。
      * @param ioThreads muduo 工作线程数。
      * @param maxMessageSize TLV value 最大字节数。
-     * @param keywordTopK 关键字推荐默认返回数量。
-     * @param webTopK 网页搜索默认返回数量。
+     * @param keywordTopK 关键字推荐默认返回数量，请求 JSON 可用 topk 覆盖。
+     * @param webTopK 网页搜索默认返回数量，请求 JSON 可用 topk 覆盖。
      */
     SearchServer(muduo::net::EventLoop* loop,
                  const muduo::net::InetAddress& listenAddr,
@@ -88,7 +88,7 @@ private:
     // 单条 TLV value 允许的最大字节数，防止异常客户端发送过大的消息。
     uint32_t maxMessageSize_;
 
-    // 默认返回数量；请求 JSON 中提供 topk 时可以覆盖。
+    // 默认返回数量；TLV 请求 JSON 中提供 topk 时可以覆盖。
     int keywordTopK_;
     int webTopK_;
 };

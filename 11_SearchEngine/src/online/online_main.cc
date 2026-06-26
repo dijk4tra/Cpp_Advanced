@@ -82,8 +82,8 @@ int main()
         int httpPort = get_int_or(config, "http_port", 18888);
         int ioThreads = get_int_or(config, "io_threads", 4);
         int httpThreads = get_int_or(config, "http_threads", 2);
-        int keywordTopK = get_int_or(config, "keyword_topk", 5);
-        int webTopK = get_int_or(config, "web_topk", 10);
+        int keywordTopK = get_int_or(config, "keyword_topk", 10);
+        int webTopK = get_int_or(config, "web_topk", 33);
         int maxMessageSize = get_int_or(config, "max_message_size", 1024 * 1024);
         std::string wwwRoot = get_or(config, "www_root", "www");
         // 摘要长度属于 WebSearcher 的运行参数，加载索引后再设置即可。

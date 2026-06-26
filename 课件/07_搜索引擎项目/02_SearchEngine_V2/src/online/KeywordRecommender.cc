@@ -125,8 +125,8 @@ std::string KeywordRecommender::recommend_json(const std::string& query,
 {
     // lang 允许为空，由 normalize_lang 根据查询内容自动推断。
     std::string realLang = normalize_lang(query, lang);
-    // topK 小于等于 0 没有实际意义，直接回退到默认返回 5 条。
-    topK = topK <= 0 ? 5 : topK;
+    // topK 小于等于 0 没有实际意义，直接回退到服务端默认返回 10 条。
+    topK = topK <= 0 ? 10 : topK;
 
     nlohmann::json response;
     // nlohmann::json 可以像 map 一样用 [] 设置字段。

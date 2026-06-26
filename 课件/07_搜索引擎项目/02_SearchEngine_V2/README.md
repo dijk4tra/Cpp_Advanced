@@ -249,8 +249,8 @@ http_port=18888
 io_threads=4
 http_threads=2
 max_message_size=1048576
-keyword_topk=5
-web_topk=10
+keyword_topk=10
+web_topk=33
 abstract_length=150
 www_root=www
 ```
@@ -266,7 +266,7 @@ www_root=www
 7. 同名 key 重复出现时，后面的配置覆盖前面的配置。
 8. `Config::get()` 查询不存在的 key 会抛异常。
 
-在线服务中，服务器端口、线程数、topK、摘要长度、前端目录等在线配置提供默认值；离线数据路径是必需配置。
+在线服务中，服务器端口、线程数、返回数量、摘要长度、前端目录等在线配置提供默认值；离线数据路径是必需配置。HTTP 浏览器接口的返回数量由 `keyword_topk` 和 `web_topk` 统一控制；TLV 协议保持原逻辑，请求 JSON 中带 `topk` 时以请求为准，未带时使用配置值。
 
 ## 5. 第一阶段：离线建库
 
@@ -533,8 +533,7 @@ flowchart TD
 ```json
 {
   "query": "搜索",
-  "lang": "cn",
-  "topk": 5
+  "lang": "cn"
 }
 ```
 
@@ -542,7 +541,7 @@ flowchart TD
 
 1. `query`：必需，用户输入。
 2. `lang`：可选，`cn`、`en` 或空字符串。为空时根据是否包含非 ASCII 字节简单判断。
-3. `topk`：可选，默认使用 `keyword_topk`。
+3. 返回数量：HTTP 接口由 `keyword_topk` 控制，默认 `10`；TLV 请求可通过 `topk` 覆盖。
 
 关键字推荐响应：
 
@@ -561,10 +560,11 @@ flowchart TD
 
 ```json
 {
-  "query": "汽车 召回",
-  "topk": 3
+  "query": "汽车 召回"
 }
 ```
+
+网页搜索返回数量：HTTP 接口由 `web_topk` 控制，默认 `33`；TLV 请求可通过 `topk` 覆盖。
 
 网页搜索响应：
 
@@ -611,7 +611,7 @@ flowchart TD
     G --> H[从词典取 word/frequency]
     H --> I[计算编辑距离]
     I --> J[排序]
-    J --> K[返回 topK JSON]
+    J --> K[返回配置数量的 JSON]
 ```
 
 候选词召回：
@@ -754,7 +754,7 @@ flowchart TD
 
 ## 10. 浏览器前端和 HTTP 服务
 
-`www/` 目录保存浏览器测试页面。当前页面名称为 `Pandex`，页面主标题为 `关键字推荐&网页搜索`，视觉风格参考 `docs/01-minimalism.html`，采用白底黑字、细边框、充足留白的 minimalism / swiss 风格。
+`www/` 目录保存浏览器测试页面。当前页面使用 `SearchEngine / Pandex` 品牌展示，视觉风格参考 `docs/01-minimalism.html`，采用白底黑字、细边框、充足留白的 minimalism / swiss 风格。
 
 ```text
 www/
@@ -768,6 +768,8 @@ www/
 
 1. 返回静态文件：`/`、`/index.html`、`/styles.css`、`/app.js`。
 2. 提供 HTTP API：`POST /api/suggest`、`POST /api/search`。
+
+浏览器前端只有一个搜索框：输入时实时请求 `/api/suggest` 并在搜索框下方弹出推荐词；提交搜索时请求 `/api/search` 展示网页结果。前端不提供 TopK 输入，也不向后端发送 TopK，推荐词和网页搜索返回数量完全由配置文件控制。
 
 HTTP API 不再通过 Python 代理，也不再转发到 TLV 端口，而是直接调用当前进程中的 `KeywordRecommender` 和 `WebSearcher`。这样启动时只需要运行一个程序：
 
@@ -842,55 +844,55 @@ HTTP: http://127.0.0.1:18888
 http://127.0.0.1:18888
 ```
 
-页面提供两个模式：
-
-1. `网页搜索`
-2. `关键字推荐`
+页面提供一个统一搜索框。输入文本时显示推荐词下拉框；推荐词右侧展示编辑距离和词频；点击推荐词或按 `Enter` 会执行网页搜索。
 
 ### 12.4 HTTP API 测试
 
 ```bash
 curl -s -X POST http://127.0.0.1:18888/api/suggest \
   -H 'Content-Type: application/json' \
-  --data '{"query":"搜索","lang":"cn","topk":3}'
+  --data '{"query":"搜索"}'
 
 curl -s -X POST http://127.0.0.1:18888/api/search \
   -H 'Content-Type: application/json' \
-  --data '{"query":"汽车 召回","topk":2}'
+  --data '{"query":"汽车 召回"}'
 ```
 
-### 12.5 使用 Python 发送 TLV 请求
+### 12.5 使用 TLV 测试客户端
 
-关键字推荐和网页搜索都可以用下面的脚本测试：
+`tests/` 目录提供了独立的 C++ TLV 测试客户端 `tlv_client.cc`。它会同时打印：
+
+1. 请求 JSON。
+2. 发送出去的 TLV 原始字节。
+3. 服务端返回的 TLV 原始字节。
+4. 解码后的响应 JSON。
+
+编译：
 
 ```bash
-python3 - <<'PY'
-import json
-import socket
-import struct
-
-def request(msg_type, payload):
-    body = json.dumps(payload, ensure_ascii=False).encode()
-    packet = struct.pack("!BI", msg_type, len(body)) + body
-
-    sock = socket.create_connection(("127.0.0.1", 8888), timeout=5)
-    sock.sendall(packet)
-
-    header = sock.recv(5)
-    resp_type, length = struct.unpack("!BI", header)
-
-    data = b""
-    while len(data) < length:
-        data += sock.recv(length - len(data))
-
-    sock.close()
-    print("type =", resp_type)
-    print(data.decode())
-
-request(1, {"query": "搜索", "lang": "cn", "topk": 5})
-request(2, {"query": "汽车 召回", "topk": 3})
-PY
+cd tests
+make
 ```
+
+关键字推荐测试：
+
+```bash
+./tlv_client --type keyword --query "搜索" --lang cn --topk 5
+```
+
+网页搜索测试：
+
+```bash
+./tlv_client --type web --query "汽车 召回" --topk 3
+```
+
+直接发送自定义 JSON：
+
+```bash
+./tlv_client --type 1 --raw-json '{"query":"搜索","lang":"cn","topk":5}'
+```
+
+TLV 协议保持原逻辑：请求 JSON 中带 `topk` 时以请求为准；不带 `topk` 时使用 `conf/config.conf` 中的默认值。更详细的参数说明和输出解读见 `tests/README.md`。
 
 关键字推荐响应示例：
 

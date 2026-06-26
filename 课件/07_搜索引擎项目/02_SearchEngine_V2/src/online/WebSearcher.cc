@@ -50,7 +50,7 @@ void WebSearcher::set_abstract_length(int length)
  */
 std::string WebSearcher::search_json(const std::string& query, int topK) const
 {
-    topK = topK <= 0 ? 10 : topK;
+    topK = topK <= 0 ? 33 : topK;
 
     nlohmann::json response;
     // 即使没有搜索结果，也返回固定 JSON 结构，前端可以统一读取 results 数组。

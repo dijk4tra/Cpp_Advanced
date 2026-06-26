@@ -117,13 +117,13 @@ std::string SearchServer::handle_request(uint8_t type, const std::string& value,
     if (type == kKeywordRequest) {
         // 关键字推荐支持 lang，可显式指定 cn/en，也可留空由推荐模块自动判断。
         std::string lang = request.value("lang", "");
-        // 请求中没有 topk 时使用配置文件中的默认值 keywordTopK_。
+        // TLV 客户端可以在请求 JSON 中传 topk；未传时使用服务端配置默认值。
         int topK = request.value("topk", keywordTopK_);
         return recommender_.recommend_json(query, lang, topK);
     }
 
     if (type == kWebRequest) {
-        // 网页搜索只需要查询词和返回数量。
+        // TLV 客户端可以在请求 JSON 中传 topk；未传时使用服务端配置默认值。
         int topK = request.value("topk", webTopK_);
         return searcher_.search_json(query, topK);
     }

@@ -304,15 +304,12 @@ std::string WebHttpServer::handle_api(const HttpRequest& request, bool keywordMo
 
     std::string body;
     if (keywordMode) {
-        // /api/suggest 复用 KeywordRecommender，返回格式与 TLV 关键字推荐一致。
-        // topk/lang 都允许前端不传，不传时使用配置默认值或自动语言判断。
-        int topK = input.value("topk", keywordTopK_);
-        std::string lang = input.value("lang", "");
-        body = recommender_.recommend_json(query, lang, topK);
+        // /api/suggest 复用 KeywordRecommender。浏览器端只提交 query，推荐数量
+        // 固定使用服务端配置，语言由 KeywordRecommender 自动判断。
+        body = recommender_.recommend_json(query, "", keywordTopK_);
     } else {
-        // /api/search 复用 WebSearcher，返回格式与 TLV 网页搜索一致。
-        int topK = input.value("topk", webTopK_);
-        body = searcher_.search_json(query, topK);
+        // /api/search 复用 WebSearcher。浏览器端不再传 topk，搜索数量由配置控制。
+        body = searcher_.search_json(query, webTopK_);
     }
 
     return make_response(200, "OK", "application/json; charset=utf-8", body);

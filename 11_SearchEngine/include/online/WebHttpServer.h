@@ -32,8 +32,8 @@ public:
      * @param searcher 网页搜索模块引用，供 /api/search 使用。
      * @param wwwRoot 前端静态文件根目录。
      * @param httpThreads HTTP 服务的 muduo 工作线程数。
-     * @param keywordTopK 关键字推荐默认返回数量。
-     * @param webTopK 网页搜索默认返回数量。
+     * @param keywordTopK HTTP 关键字推荐返回数量，来自服务端配置。
+     * @param webTopK HTTP 网页搜索返回数量，来自服务端配置。
      */
     WebHttpServer(muduo::net::EventLoop* loop,
                   const muduo::net::InetAddress& listenAddr,
@@ -142,7 +142,7 @@ private:
     // 前端静态文件目录，一般为项目根目录下的 www。
     std::string wwwRoot_;
 
-    // 默认返回数量；POST body 中传 topk 时可覆盖。
+    // HTTP API 返回数量由服务端配置统一控制，浏览器请求不覆盖。
     int keywordTopK_;
     int webTopK_;
 };

@@ -1,42 +1,30 @@
 const state = {
-    mode: "web",
-    busy: false
+    busy: false,
+    composing: false,
+    suggestTimer: null,
+    suggestController: null,
+    suggestRequestId: 0,
+    suggestions: [],
+    activeSuggestion: -1
 };
+
+const SUGGEST_DEBOUNCE_MS = 200;
 
 const form = document.querySelector("#searchForm");
 const queryInput = document.querySelector("#queryInput");
-const topkInput = document.querySelector("#topkInput");
-const langSelect = document.querySelector("#langSelect");
-const langOption = document.querySelector("#langOption");
-const modeLabel = document.querySelector("#modeLabel");
 const resultCount = document.querySelector("#resultCount");
 const elapsedTime = document.querySelector("#elapsedTime");
-const resultsTitle = document.querySelector("#resultsTitle");
 const results = document.querySelector("#results");
 const clearButton = document.querySelector("#clearButton");
 const serverState = document.querySelector("#serverState");
-const modeTabs = Array.from(document.querySelectorAll(".mode-tab"));
-
-function setMode(mode) {
-    state.mode = mode;
-    modeTabs.forEach((button) => {
-        button.classList.toggle("active", button.dataset.mode === mode);
-    });
-
-    const isKeyword = mode === "keyword";
-    langOption.classList.toggle("hidden", !isKeyword);
-    topkInput.value = isKeyword ? "5" : "10";
-    modeLabel.textContent = isKeyword ? "关键字推荐" : "网页搜索";
-    resultsTitle.textContent = isKeyword ? "推荐词" : "查询结果";
-    queryInput.placeholder = isKeyword ? "输入关键词" : "输入查询词";
-}
+const suggestions = document.querySelector("#suggestions");
 
 function setServerState(kind, text) {
     serverState.classList.remove("ok", "error");
     if (kind) {
         serverState.classList.add(kind);
     }
-    serverState.querySelector("span:last-child").textContent = text;
+    serverState.querySelector(".status-value strong").textContent = text;
 }
 
 function setEmpty(text = "暂无结果") {
@@ -68,25 +56,12 @@ function safeAbstract(value) {
         .replaceAll("\u0001", "</em>");
 }
 
-function normalizeTopK() {
-    const value = Number.parseInt(topkInput.value, 10);
-    if (Number.isNaN(value)) {
-        return state.mode === "keyword" ? 5 : 10;
-    }
-    return Math.max(1, Math.min(50, value));
-}
-
-async function callApi(query) {
-    const topk = normalizeTopK();
-    const endpoint = state.mode === "keyword" ? "/api/suggest" : "/api/search";
-    const payload = state.mode === "keyword"
-        ? { query, topk, lang: langSelect.value }
-        : { query, topk };
-
+async function postJson(endpoint, payload, signal) {
     const response = await fetch(endpoint, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload)
+        body: JSON.stringify(payload),
+        signal
     });
 
     const data = await response.json();
@@ -96,25 +71,130 @@ async function callApi(query) {
     return data;
 }
 
-function renderKeywordResults(items) {
-    results.className = "results";
+function hideSuggestions() {
+    suggestions.classList.add("hidden");
+    suggestions.innerHTML = "";
+    state.suggestions = [];
+    state.activeSuggestion = -1;
+    queryInput.setAttribute("aria-expanded", "false");
+}
+
+function cancelPendingSuggestions() {
+    window.clearTimeout(state.suggestTimer);
+    state.suggestTimer = null;
+    ++state.suggestRequestId;
+    if (state.suggestController) {
+        state.suggestController.abort();
+        state.suggestController = null;
+    }
+}
+
+function setActiveSuggestion(index) {
+    const items = Array.from(suggestions.querySelectorAll(".suggestion-item"));
     if (!items.length) {
-        setEmpty("没有推荐词");
+        state.activeSuggestion = -1;
         return;
     }
 
-    results.innerHTML = `
-        <div class="keyword-list">
-            ${items.map((item) => `
-                <div class="keyword-chip">
-                    <span class="chip-word">${escapeHtml(item.word)}</span>
-                    <span class="chip-meta">距离 ${escapeHtml(item.distance)}</span>
-                    <span class="chip-meta">词频 ${escapeHtml(item.frequency)}</span>
-                </div>
-            `).join("")}
-        </div>
-    `;
-    resultCount.textContent = String(items.length);
+    state.activeSuggestion = (index + items.length) % items.length;
+    items.forEach((item, itemIndex) => {
+        const active = itemIndex === state.activeSuggestion;
+        item.classList.toggle("active", active);
+        item.setAttribute("aria-selected", active ? "true" : "false");
+    });
+}
+
+function renderSuggestions(items) {
+    const normalizedItems = items
+        .map((item) => ({
+            word: String(item.word || ""),
+            distance: item.distance,
+            frequency: item.frequency
+        }))
+        .filter((item) => item.word);
+
+    if (!normalizedItems.length) {
+        hideSuggestions();
+        return;
+    }
+
+    state.suggestions = normalizedItems;
+    state.activeSuggestion = -1;
+    suggestions.className = "suggestions";
+    suggestions.innerHTML = normalizedItems.map((item, index) => `
+        <button class="suggestion-item"
+                type="button"
+                role="option"
+                aria-selected="false"
+                data-index="${index}">
+            <span class="suggestion-word">${escapeHtml(item.word)}</span>
+            <span class="suggestion-meta">编辑距离${escapeHtml(item.distance)}&nbsp;&nbsp;词频${escapeHtml(item.frequency)}</span>
+        </button>
+    `).join("");
+    queryInput.setAttribute("aria-expanded", "true");
+}
+
+async function loadSuggestions(query) {
+    if (state.suggestController) {
+        state.suggestController.abort();
+    }
+
+    const requestId = ++state.suggestRequestId;
+    const controller = new AbortController();
+    state.suggestController = controller;
+
+    try {
+        const data = await postJson(
+            "/api/suggest",
+            { query },
+            controller.signal
+        );
+        if (requestId !== state.suggestRequestId) {
+            return;
+        }
+        renderSuggestions(Array.isArray(data.results) ? data.results : []);
+    } catch (error) {
+        if (error.name !== "AbortError") {
+            hideSuggestions();
+        }
+    } finally {
+        if (state.suggestController === controller) {
+            state.suggestController = null;
+        }
+    }
+}
+
+function queueSuggestions() {
+    if (state.composing) {
+        return;
+    }
+
+    window.clearTimeout(state.suggestTimer);
+    const query = queryInput.value.trim();
+    if (!query) {
+        cancelPendingSuggestions();
+        hideSuggestions();
+        return;
+    }
+
+    state.suggestTimer = window.setTimeout(() => {
+        loadSuggestions(query);
+    }, SUGGEST_DEBOUNCE_MS);
+}
+
+function applySuggestion(index, searchImmediately) {
+    const item = state.suggestions[index];
+    if (!item) {
+        return;
+    }
+
+    queryInput.value = item.word;
+    hideSuggestions();
+    queryInput.focus();
+
+    if (searchImmediately) {
+        performSearch(item.word);
+    }
 }
 
 function renderWebResults(items) {
@@ -144,21 +224,22 @@ function renderWebResults(items) {
     resultCount.textContent = String(items.length);
 }
 
-async function submitSearch(event) {
-    event.preventDefault();
+async function performSearch(rawQuery) {
     if (state.busy) {
         return;
     }
 
-    const query = queryInput.value.trim();
+    const query = rawQuery.trim();
     if (!query) {
         setEmpty("请输入查询内容");
         return;
     }
 
+    cancelPendingSuggestions();
+    hideSuggestions();
     state.busy = true;
     const start = performance.now();
-    setServerState(null, "查询中");
+    setServerState(null, "Searching");
     results.className = "results empty-state";
     results.innerHTML = `
         <div class="empty-mark">◌</div>
@@ -166,21 +247,15 @@ async function submitSearch(event) {
     `;
 
     try {
-        const data = await callApi(query);
+        const data = await postJson("/api/search", { query });
         const elapsed = Math.round(performance.now() - start);
         elapsedTime.textContent = `${elapsed} ms`;
-        setServerState("ok", "后端已连接");
-
-        const items = Array.isArray(data.results) ? data.results : [];
-        if (state.mode === "keyword") {
-            renderKeywordResults(items);
-        } else {
-            renderWebResults(items);
-        }
+        setServerState("ok", "Online");
+        renderWebResults(Array.isArray(data.results) ? data.results : []);
     } catch (error) {
         elapsedTime.textContent = "-";
         resultCount.textContent = "0";
-        setServerState("error", "服务不可用");
+        setServerState("error", "Offline");
         results.className = "results";
         results.innerHTML = `<div class="error-box">${escapeHtml(error.message)}</div>`;
     } finally {
@@ -188,19 +263,68 @@ async function submitSearch(event) {
     }
 }
 
-modeTabs.forEach((button) => {
-    button.addEventListener("click", () => setMode(button.dataset.mode));
-});
+function submitSearch(event) {
+    event.preventDefault();
+    performSearch(queryInput.value);
+}
 
 form.addEventListener("submit", submitSearch);
+
+queryInput.addEventListener("input", queueSuggestions);
+
+queryInput.addEventListener("compositionstart", () => {
+    state.composing = true;
+});
+
+queryInput.addEventListener("compositionend", () => {
+    state.composing = false;
+    queueSuggestions();
+});
+
+queryInput.addEventListener("keydown", (event) => {
+    const suggestionsVisible = !suggestions.classList.contains("hidden");
+    if (!suggestionsVisible) {
+        return;
+    }
+
+    if (event.key === "ArrowDown") {
+        event.preventDefault();
+        setActiveSuggestion(state.activeSuggestion + 1);
+    } else if (event.key === "ArrowUp") {
+        event.preventDefault();
+        setActiveSuggestion(state.activeSuggestion - 1);
+    } else if (event.key === "Enter" && state.activeSuggestion >= 0) {
+        event.preventDefault();
+        applySuggestion(state.activeSuggestion, true);
+    } else if (event.key === "Escape") {
+        hideSuggestions();
+    }
+});
+
+queryInput.addEventListener("blur", () => {
+    window.setTimeout(hideSuggestions, 120);
+});
+
+suggestions.addEventListener("mousedown", (event) => {
+    event.preventDefault();
+});
+
+suggestions.addEventListener("click", (event) => {
+    const button = event.target.closest(".suggestion-item");
+    if (!button) {
+        return;
+    }
+    applySuggestion(Number(button.dataset.index), true);
+});
 
 clearButton.addEventListener("click", () => {
     queryInput.value = "";
     elapsedTime.textContent = "-";
-    setServerState(null, "等待查询");
+    setServerState(null, "Idle");
+    cancelPendingSuggestions();
+    hideSuggestions();
     setEmpty();
     queryInput.focus();
 });
 
-setMode("web");
 setEmpty();
