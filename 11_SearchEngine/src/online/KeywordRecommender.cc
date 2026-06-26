@@ -114,8 +114,8 @@ void KeywordRecommender::load(const std::string& cnDict,
  * @brief 根据查询词生成推荐结果 JSON。
  * @throws utf8::exception 中文输入或词典项编码非法时可能抛出。
  */
-std::string KeywordRecommender::recommend_json(const std::string &query,
-                                               const std::string &lang,
+std::string KeywordRecommender::recommend_json(const std::string& query,
+                                               const std::string& lang,
                                                int topK) const
 {
     // lang 允许为空，由 normalize_lang 根据查询内容自动推断。
@@ -188,7 +188,7 @@ std::string KeywordRecommender::recommend_json(const std::string &query,
     });
 
     // static_cast<int> 明确把 size_t 转成 int，避免 signed/unsigned 比较警告
-    int count = std::min(topK, static_cast<int>(candidateLines.size()));
+    int count = std::min(topK, static_cast<int>(candidates.size()));
     for (int i = 0; i < count; ++i) {
         response["results"].push_back({
             {"word", candidates[i].word},
@@ -312,7 +312,7 @@ int KeywordRecommender::edit_distance(const std::string& lhs,
 
     // 从短串逐步扩展到完整字符串。每个状态只依赖左边、上边和左上角三个状态
     for (std::size_t i = 1; i <= left.size(); ++i) {
-        for (std::size_t j = 1 ; i <= right.size(); ++j) {
+        for (std::size_t j = 1 ; j <= right.size(); ++j) {
             if (left[i - 1] == right[j - 1]) {
                 // 当前字符相同，不需要额外操作
                 dp[i][j] = dp[i - 1][j - 1];

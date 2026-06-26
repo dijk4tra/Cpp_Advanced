@@ -19,10 +19,10 @@ class Buffer;
  */
 struct Request
 {
-    // 业务类型：1 表示关键字推荐，2 表示网页搜索
+    // 业务类型：1 表示关键字推荐，2 表示网页搜索。
     uint8_t type = 0;
 
-    // TLV 中的 value 部分，约定保存 JSON 字符串
+    // TLV 中的 value 部分，约定保存 JSON 字符串。
     std::string value;
 };
 
@@ -52,12 +52,11 @@ public:
                            Request& request,
                            uint32_t maxMessageSize);
 
-private:
     /**
      * @brief 将业务响应 JSON 封装为 TLV 字节串。
      * @param type 响应类型，通常与请求类型相同，错误响应使用 100。
      * @param value JSON 字符串。
      * @return 可直接发送给 TcpConnection::send() 的完整字节串。
      */
-    static std::string encode(uint8_t type, const std::string value);
+    static std::string encode(uint8_t type, const std::string& value);
 };

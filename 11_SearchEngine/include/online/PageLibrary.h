@@ -12,16 +12,16 @@
  */
 struct Document
 {
-    // 文档编号，与 offsets.dat 和 invert_index.dat 中使用的 docId 一致
+    // 文档编号，与 offsets.dat 和 invert_index.dat 中使用的 docId 一致。
     int id = 0;
 
-    // 网页标题；离线语料缺少标题时可能为空
+    // 网页标题；离线语料缺少标题时可能为空。
     std::string title;
 
-    // 网页原始链接；离线语料缺少链接时可能为空
+    // 网页原始链接；离线语料缺少链接时可能为空。
     std::string link;
 
-    // 网页正文，用于生成动态摘要
+    // 网页正文，用于生成动态摘要。
     std::string content;
 };
 
@@ -33,13 +33,13 @@ struct Document
  */
 struct PageOffset
 {
-    // 文档编号
+    // 文档编号。
     int docId = 0;
 
-    // 文档片段在 pages.dat 中的起始字节偏移
+    // 文档片段在 pages.dat 中的起始字节偏移。
     std::uint64_t offset = 0;
 
-    // 文档片段的字节长度
+    // 文档片段的字节长度。
     std::uint64_t length = 0;
 };
 
@@ -50,6 +50,7 @@ struct PageOffset
  * 偏移库仍用于从 pages.dat 中准确切出每一篇 <doc> 片段。
  *
  * load() 完成后，find() 只做哈希表查询，不修改内部状态，可以被搜索线程并发读取。
+ * 第二期暂不实现按需加载或缓存淘汰。
  */
 class PageLibrary
 {

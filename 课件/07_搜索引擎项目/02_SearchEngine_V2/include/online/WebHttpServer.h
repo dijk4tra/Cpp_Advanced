@@ -1,7 +1,7 @@
 #pragma once
 
-#include "KeywordRecommender.h"
-#include "WebSearcher.h"
+#include "../../include/online/KeywordRecommender.h"
+#include "../../include/online/WebSearcher.h"
 
 #include <muduo/net/TcpServer.h>
 

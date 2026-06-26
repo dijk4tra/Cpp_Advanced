@@ -6,9 +6,12 @@
 #include <cmath>
 #include <fstream>
 #include <iterator>
+#include <map>
 #include <nlohmann/json.hpp>
 #include <sstream>
 #include <stdexcept>
+#include <string>
+#include <vector>
 
 /**
  * @brief 构造网页搜索器并初始化 cppjieba。
@@ -34,4 +37,264 @@ void WebSearcher::load(const std::string& pages,
     stopWords_ = TextUtils::load_stop_words(stopWords);
     pageLibrary_.load(pages, offsets);
     load_inverted_index(invertIndex);
+}
+
+/**
+ * @brief 设置动态摘要长度。
+ */
+void WebSearcher::set_abstract_length(int length)
+{
+    // 摘要长度必须为正数；非法配置统一回退到 150，保持结果可读。
+    abstractLength_ = length > 0 ? length : 150;
+}
+
+/**
+ * @brief 执行网页搜索并返回 JSON。
+ */
+std::string WebSearcher::search_json(const std::string& query, int topK) const
+{
+    topK = topK <= 0 ? 10 : topK;
+
+    nlohmann::json response;
+    // 即使没有搜索结果，也返回固定 JSON 结构，前端可以统一读取 results 数组。
+    response["type"] = "web";
+    response["query"] = query;
+    response["result"] = nlohmann::json::array();
+
+    // 第一步：分词并统计查询词频，得到查询 TF 的基础数据
+    std::map<std::string, int> termCount = cut_query(query);
+    if (termCount.empty()) {
+        // 查询被分词和过滤后没有有效词，返回空结果。
+        return response.dump();
+    }
+
+    // 第二步：把查询词频转成归一化 TF-IDF 向量
+    std::map<std::string, double> queryVector = build_query_vector(termCount);
+    if (queryVector.empty()) {
+        // 任一查询词不在倒排索引中，或向量无法归一化时都没有候选结果。
+        return response.dump();
+    }
+
+    // 第三步：取所有查询词 posting list 的交集，得到候选文档集合
+    std::set<int> candidateDocs = find_candidate_docs(queryVector);
+    if (candidateDocs.empty()) {
+        return response.dump();
+    }
+
+    // 局部结构体只保存排序需要的字段，真正展示信息稍后再从 PageLibrary 查询。
+    struct SearchResult {
+        int docId = 0;
+        double score = 0.0;
+    };
+
+    std::vector<SearchResult> results;
+    for (int docId : candidateDocs) {
+        double score = 0.0;
+
+        // 文档向量在一期已经按 L2 范数归一化。
+        // 查询向量在 build_query_vector()中也已归一化，因此余弦相似度可直接按点积计算。
+        for (const auto& [word, queryWeight] : queryVector) {
+            auto wordIt = invertedIndex_.find(word);
+            if (wordIt == invertedIndex_.end()) {
+                continue;
+            }
+            auto docIt = wordIt->second.find(docId);
+            if (docIt != wordIt->second.end()) {
+                // 点积公式：score += 查询词权重 * 文档中该词权重。
+                score += queryWeight * docIt->second;
+            }
+        }
+
+        // 使用列表初始化构造 SearchResult
+        results.push_back({docId, score});
+    }
+
+    // 分数高的排在前面；分数相同按 docId 升序，保证结果稳定。
+    std::sort(results.begin(), results.end(), [](const SearchResult& lhs, const SearchResult& rhs) {
+        if (lhs.score != rhs.score) {
+            return lhs.score > rhs.score; // 按分数降序
+        }
+        return lhs.docId < rhs.docId; // 分数相同则按docId升序
+    });
+
+    std::vector<std::string> keywords;
+    // 动态摘要需要知道本次查询有哪些有效关键词，用于窗口打分和高亮
+    for (const auto& [word, weight] : queryVector) {
+        keywords.push_back(word);
+    }
+
+    // topK 可能大于实际结果数，取二者较小值避免数组越界
+    int count = std::min(topK, static_cast<int>(results.size()));
+    for (int i = 0; i < count; ++i) {
+        const Document* doc = pageLibrary_.find(results[i].docId);
+        if (doc == nullptr) {
+            continue;
+        }
+
+        // initializer list 构造一个 JSON object，再追加到 results 数组中
+        response["results"].push_back({
+            {"id", doc->id},
+            {"title", doc->title},
+            {"link", doc->link},
+            // 摘要在查询时动态生成，因此可以围绕本次关键词截取最相关片段
+            {"abstract", DynamicAbstract::generate(doc->content, keywords, abstractLength_)},
+            {"score", results[i].score}
+        });
+    }
+
+    return response.dump();
+}
+
+/**
+ * @brief 加载倒排索引。
+ */
+void WebSearcher::load_inverted_index(const std::string& filename)
+{
+    std::ifstream ifs(filename);
+    if (!ifs) {
+        throw std::runtime_error("failed to open inverted index: " + filename);
+    }
+
+    invertedIndex_.clear();
+
+    std::string line;
+    // 倒排索引每一行长度不固定，getline 先拿到整行，再用 istringstream 逐项解析
+    while (std::getline(ifs, line)) {
+        std::istringstream iss(line);
+        std::string word;
+        // 每行格式：word docId weight docId weight ...
+        iss >> word;
+        if (word.empty()) {
+            continue;
+        }
+
+        int docId = 0;
+        double weight = 0.0;
+        // 一行中可能有多个 docId/weight 对，循环读到本行结束为止
+        while (iss >> docId >> weight) {
+            // 离线阶段已经对文档 TF-IDF 向量做过 L2 归一化，weight 可直接用于点积。
+            // invertedIndex_[word] 不存在时会自动创建一个空 PostingMap。
+            invertedIndex_[word][docId] = weight;
+        }
+    }
+}
+
+/**
+ * @brief 对查询语句分词并统计有效词频。
+ */
+std::map<std::string, int> WebSearcher::cut_query(const std::string& query) const
+{
+    std::vector<std::string> words;
+    // cppjieba 将中文查询切成词语，结果写入 words 输出参数
+    tokenizer_.Cut(query, words);
+
+    std::map<std::string, int> termCount;
+    for (const auto& word : words) {
+        // 停用词和纯标点/数字等无意义 token 不参与检索
+        if (stopWords_.count(word) != 0) {
+            continue;
+        }
+        if (TextUtils::is_useless_token(word)) {
+            continue;
+        }
+        // map 的 operator[] 在 word 不存在时会插入默认值 0，然后 ++ 变成 1
+        ++termCount[word];
+    }
+
+    return termCount;
+}
+
+/**
+ * @brief 根据查询词频计算归一化 TF-IDF 查询向量。
+ */
+std::map<std::string, double> WebSearcher::build_query_vector(const std::map<std::string, int>& termCount) const
+{
+    std::map<std::string, double> queryVector;
+    double squareSum = 0.0;
+    int totalWords = 0;
+    // 先统计查询中的有效词总数，用于计算 TF
+    for (const auto& [word, count] : termCount) {
+        totalWords += count;
+    }
+
+    // pageLibrary_.size() 是 size_t，转成 double 后参与 IDF 的浮点计算
+    const double documentCount = static_cast<double>(pageLibrary_.size());
+    if (totalWords == 0 || documentCount == 0.0) {
+        return queryVector;
+    }
+
+    for (const auto& [word, count] : termCount) {
+        auto it = invertedIndex_.find(word);
+        if (it == invertedIndex_.end()) {
+            // 主流程要求查询包含所有关键词的网页。任一词不在倒排索引中，
+            // 后续一定没有同时包含所有词的文档，直接返回空向量。
+            return {};
+        }
+
+        // 查询 TF 使用词频 / 查询有效词总数。DF 由 posting list 长度推导，
+        // IDF 按第二期要求使用 log2(N / (DF + 1))。
+        // count 和 totalWords 都是整数，需要转成 double，否则会发生整数除法。
+        double tf = static_cast<double>(count) / totalWords;
+        double df = static_cast<double>(it->second.size());
+        double idf = std::log2(documentCount / (df + 1.0));
+        double weight = tf * idf;
+        queryVector[word] = weight;
+        // squareSum 是向量每个维度权重平方和，后面开方得到 L2 范数。
+        squareSum += weight * weight;
+    }
+
+    double norm = std::sqrt(squareSum);
+    if (norm == 0.0) {
+        return {};
+    }
+
+    // 归一化后，查询向量和文档向量的余弦相似度可直接用点积计算
+    for (auto& [word, weight] : queryVector) {
+        // auto& 允许直接修改 map 中保存的 weight
+        weight /= norm;
+    }
+    return queryVector;
+}
+
+/**
+ * @brief 取所有查询词 posting list 的交集。
+ */
+std::set<int> WebSearcher::find_candidate_docs(const std::map<std::string, double>& queryVector) const
+{
+    std::set<int> candidates;
+    bool firstWord = true;
+
+    for (const auto& [word, weight] : queryVector) {
+        auto wordIt = invertedIndex_.find(word);
+        if (wordIt == invertedIndex_.end()) {
+            return {};
+        }
+
+        std::set<int> currentDocs;
+        for (const auto& [docId, docWeight] : wordIt->second) {
+            // 当前词的 posting map 中，每个 key 就是一篇包含该词的文档。
+            currentDocs.insert(docId);
+        }
+
+        if (firstWord) {
+            // 第一个词的 posting list 作为初始候选集合。
+            candidates.swap(currentDocs);
+            firstWord = false;
+            continue;
+        }
+
+        // 后续每个词都与当前候选集合求交集，最终只保留同时包含所有查询词的文档
+        std::set<int> intersection;
+        // set_intersection 要求输入区间有序。std::set 天然有序，正好满足要求。
+        // inserter 会把交集结果不断插入 intersection。
+        std::set_intersection(candidates.begin(), candidates.end(),
+                              currentDocs.begin(), currentDocs.end(),
+                              std::inserter(intersection, intersection.begin()));
+        candidates.swap(intersection);
+        if (candidates.empty()) {
+            return candidates;
+        }
+    }
+
+    return candidates;
 }

@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Pandex</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <main class="app-shell">
+        <header class="topbar">
+            <div>
+                <p class="eyebrow">Pandex</p>
+                <h1>关键字推荐&网页搜索</h1>
+            </div>
+            <div class="server-pill" id="serverState">
+                <span class="state-dot"></span>
+                <span>等待查询</span>
+            </div>
+        </header>
+
+        <section class="search-panel">
+            <form id="searchForm" class="search-form">
+                <div class="mode-tabs" role="tablist" aria-label="搜索模式">
+                    <button type="button" class="mode-tab active" data-mode="web">网页搜索</button>
+                    <button type="button" class="mode-tab" data-mode="keyword">关键字推荐</button>
+                </div>
+
+                <div class="search-row">
+                    <input id="queryInput" class="query-input" type="search" autocomplete="off" placeholder="输入查询词" autofocus>
+                    <button class="search-button" type="submit">
+                        <span class="button-icon" aria-hidden="true">⌕</span>
+                        <span>搜索</span>
+                    </button>
+                </div>
+
+                <div class="options-row">
+                    <label>
+                        <span>TopK</span>
+                        <input id="topkInput" type="number" min="1" max="50" value="10">
+                    </label>
+                    <label id="langOption" class="hidden">
+                        <span>语言</span>
+                        <select id="langSelect">
+                            <option value="">自动</option>
+                            <option value="cn">中文</option>
+                            <option value="en">英文</option>
+                        </select>
+                    </label>
+                </div>
+            </form>
+        </section>
+
+        <section class="content-grid">
+            <aside class="side-panel">
+                <div class="metric">
+                    <span class="metric-label">模式</span>
+                    <strong id="modeLabel">网页搜索</strong>
+                </div>
+                <div class="metric">
+                    <span class="metric-label">结果数</span>
+                    <strong id="resultCount">0</strong>
+                </div>
+                <div class="metric">
+                    <span class="metric-label">耗时</span>
+                    <strong id="elapsedTime">-</strong>
+                </div>
+            </aside>
+
+            <section class="results-panel">
+                <div class="results-head">
+                    <h2 id="resultsTitle">查询结果</h2>
+                    <button id="clearButton" class="ghost-button" type="button">清空</button>
+                </div>
+                <div id="results" class="results empty-state">
+                    <div class="empty-mark">⌁</div>
+                    <p>暂无结果</p>
+                </div>
+            </section>
+        </section>
+    </main>
+
+    <script src="app.js"></script>
+</body>
+</html>
