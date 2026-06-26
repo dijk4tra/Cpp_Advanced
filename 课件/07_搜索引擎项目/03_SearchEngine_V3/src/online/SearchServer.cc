@@ -46,7 +46,7 @@ SearchServer::SearchServer(muduo::net::EventLoop* loop,
     // 成员函数自带一个隐藏的 this 指针，因此绑定时必须把 this 也传进去。
     server_.setConnectionCallback(std::bind(&SearchServer::on_connection, this, _1));
     server_.setMessageCallback(std::bind(&SearchServer::on_message, this, _1, _2, _3));
-    // 线程数来自配置文件。第二期未引入缓存，各线程只读共享业务数据。
+    // 线程数来自配置文件。第三期缓存对象内部负责并发控制，网络层只共享业务服务引用。
     server_.setThreadNum(ioThreads);
 }
 

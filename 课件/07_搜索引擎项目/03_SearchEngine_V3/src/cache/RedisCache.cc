@@ -1,40 +1,42 @@
 #include "../../include/cache/RedisCache.h"
 
-#include <arpa/inet.h>
-#include <cerrno>
-#include <cstring>
-#include <fcntl.h>
-#include <netdb.h>
-#include <sstream>
-#include <stdexcept>
-#include <sys/select.h>
-#include <sys/socket.h>
+#include <hiredis/hiredis.h>
+
+#include <memory>
 #include <sys/time.h>
-#include <unistd.h>
 #include <utility>
 
 namespace
 {
-class SocketGuard
-{
-public:
-    explicit SocketGuard(int fd) : fd_(fd) {}
-    ~SocketGuard()
+// hiredis 的 redisContext 需要使用 redisFree() 释放。放进 unique_ptr 时，需要提供
+// 自定义 deleter，否则默认 deleter 会调用 delete，导致释放方式错误。
+struct RedisContextDeleter {
+    void operator()(redisContext* context) const
     {
-        if (fd_ >= 0) {
-            ::close(fd_);
+        if (context != nullptr) {
+            redisFree(context);
         }
     }
-
-    SocketGuard(const SocketGuard&) = delete;
-    SocketGuard& operator=(const SocketGuard&) = delete;
-
-    int get() const { return fd_; }
-
-private:
-    int fd_;
 };
 
+// hiredis 的 redisReply 由 freeReplyObject() 释放，同样不能直接 delete。
+struct RedisReplyDeleter {
+    void operator()(redisReply* reply) const
+    {
+        if (reply != nullptr) {
+            freeReplyObject(reply);
+        }
+    }
+};
+
+// unique_ptr 的第二个模板参数是删除器类型。这样函数中只要创建 RedisContextPtr
+// 或 RedisReplyPtr，就能在离开作用域时自动释放 hiredis 资源。
+using RedisContextPtr = std::unique_ptr<redisContext, RedisContextDeleter>;
+using RedisReplyPtr = std::unique_ptr<redisReply, RedisReplyDeleter>;
+
+/**
+ * @brief 将毫秒超时转换为 hiredis 需要的 timeval。
+ */
 timeval to_timeval(int milliseconds)
 {
     milliseconds = milliseconds > 0 ? milliseconds : 20;
@@ -43,18 +45,14 @@ timeval to_timeval(int milliseconds)
     tv.tv_usec = (milliseconds % 1000) * 1000;
     return tv;
 }
-
-std::string encode_command(const std::vector<std::string>& command)
-{
-    std::ostringstream oss;
-    oss << '*' << command.size() << "\r\n";
-    for (const auto& part : command) {
-        oss << '$' << part.size() << "\r\n" << part << "\r\n";
-    }
-    return oss.str();
-}
 }
 
+/**
+ * @brief 构造 Redis 缓存客户端配置。
+ *
+ * 当前 RedisCache 不持有长连接，只保存连接参数。每次 get/put/erase 单独建连，
+ * 简化多线程安全问题；后续如果需要更高性能，可以在这个类内部替换为连接池。
+ */
 RedisCache::RedisCache(std::string host,
                        int port,
                        int db,
@@ -68,239 +66,116 @@ RedisCache::RedisCache(std::string host,
 {
 }
 
+/**
+ * @brief 从 Redis 读取 key。
+ */
 bool RedisCache::get(const std::string& key, std::string& value)
 {
-    Reply reply;
-    if (!execute({"GET", key}, reply)) {
+    // 每次命令创建独立连接，RedisContextPtr 保证本函数结束时自动 redisFree。
+    RedisContextPtr context(connect());
+    if (context == nullptr || !select_db(context.get())) {
         return false;
     }
 
-    if (reply.type != Reply::Type::BulkString) {
+    // hiredis 的 redisCommand 支持 printf 风格格式串。%b 表示“二进制安全字符串”，
+    // 后面必须传 data 指针和长度，适合保存 JSON 等可能包含空字节以外任意内容的值。
+    RedisReplyPtr reply(static_cast<redisReply*>(
+        redisCommand(context.get(), "GET %b", key.data(), key.size())));
+    if (reply == nullptr || reply->type != REDIS_REPLY_STRING) {
         return false;
     }
 
-    value = std::move(reply.text);
+    // redisReply 的 str 不保证按 C 字符串处理安全，使用 len 构造 std::string。
+    value.assign(reply->str, reply->len);
     return true;
 }
 
+/**
+ * @brief 写入 Redis。
+ */
 void RedisCache::put(const std::string& key, const std::string& value, int ttlSeconds)
 {
-    Reply reply;
+    RedisContextPtr context(connect());
+    if (context == nullptr || !select_db(context.get())) {
+        return;
+    }
+
     if (ttlSeconds > 0) {
-        execute({"SETEX", key, std::to_string(ttlSeconds), value}, reply);
+        // SETEX key seconds value：写入并设置过期时间。key 和 value 都用 %b，
+        // 避免因为字符串中出现特殊字符而被 hiredis 按普通 C 字符串截断。
+        RedisReplyPtr reply(static_cast<redisReply*>(
+            redisCommand(context.get(),
+                         "SETEX %b %d %b",
+                         key.data(),
+                         key.size(),
+                         ttlSeconds,
+                         value.data(),
+                         value.size())));
     } else {
-        execute({"SET", key, value}, reply);
+        // ttlSeconds <= 0 与本项目 Cache 接口约定一致，表示不过期，因此使用 SET。
+        RedisReplyPtr reply(static_cast<redisReply*>(
+            redisCommand(context.get(),
+                         "SET %b %b",
+                         key.data(),
+                         key.size(),
+                         value.data(),
+                         value.size())));
     }
 }
 
+/**
+ * @brief 删除 Redis 中的 key。
+ */
 void RedisCache::erase(const std::string& key)
 {
-    Reply reply;
-    execute({"DEL", key}, reply);
+    RedisContextPtr context(connect());
+    if (context == nullptr || !select_db(context.get())) {
+        return;
+    }
+
+    RedisReplyPtr reply(static_cast<redisReply*>(
+        redisCommand(context.get(), "DEL %b", key.data(), key.size())));
 }
 
-bool RedisCache::execute(const std::vector<std::string>& command, Reply& reply) const
+/**
+ * @brief 建立 Redis 连接并设置命令超时。
+ *
+ * 返回裸指针是为了直接交给 RedisContextPtr 接管。失败时返回 nullptr，调用方将其
+ * 视为缓存不可用，不影响主搜索流程。
+ */
+redisContext* RedisCache::connect() const
 {
-    try {
-        int fd = connect_socket();
-        if (fd < 0) {
-            return false;
-        }
-
-        SocketGuard guard(fd);
-        if (!select_db(fd)) {
-            return false;
-        }
-        if (!send_command(fd, command)) {
-            return false;
-        }
-        return read_reply(fd, reply) && reply.type != Reply::Type::Error && reply.type != Reply::Type::Invalid;
-    } catch (const std::exception&) {
-        return false;
+    timeval connectTimeout = to_timeval(connectTimeoutMs_);
+    redisContext* context = redisConnectWithTimeout(host_.c_str(), port_, connectTimeout);
+    if (context == nullptr) {
+        return nullptr;
     }
+    if (context->err != 0) {
+        redisFree(context);
+        return nullptr;
+    }
+
+    // redisSetTimeout 设置后续命令的读写超时，避免 Redis 卡住时阻塞业务线程太久。
+    timeval commandTimeout = to_timeval(commandTimeoutMs_);
+    if (redisSetTimeout(context, commandTimeout) != REDIS_OK) {
+        redisFree(context);
+        return nullptr;
+    }
+
+    return context;
 }
 
-bool RedisCache::select_db(int fd) const
+/**
+ * @brief 切换 Redis DB。
+ */
+bool RedisCache::select_db(redisContext* context) const
 {
-    if (db_ == 0) {
-        return true;
+    if (context == nullptr || db_ == 0) {
+        return context != nullptr;
     }
 
-    Reply reply;
-    return send_command(fd, {"SELECT", std::to_string(db_)})
-        && read_reply(fd, reply)
-        && reply.type == Reply::Type::SimpleString;
-}
-
-int RedisCache::connect_socket() const
-{
-    addrinfo hints;
-    std::memset(&hints, 0, sizeof(hints));
-    hints.ai_family = AF_UNSPEC;
-    hints.ai_socktype = SOCK_STREAM;
-
-    addrinfo* result = nullptr;
-    int err = ::getaddrinfo(host_.c_str(), std::to_string(port_).c_str(), &hints, &result);
-    if (err != 0) {
-        return -1;
-    }
-
-    int connected = -1;
-    for (addrinfo* rp = result; rp != nullptr; rp = rp->ai_next) {
-        int fd = ::socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
-        if (fd < 0) {
-            continue;
-        }
-
-        int flags = ::fcntl(fd, F_GETFL, 0);
-        if (flags >= 0) {
-            ::fcntl(fd, F_SETFL, flags | O_NONBLOCK);
-        }
-
-        int rc = ::connect(fd, rp->ai_addr, rp->ai_addrlen);
-        if (rc == 0) {
-            connected = fd;
-        } else if (errno == EINPROGRESS) {
-            fd_set writeSet;
-            FD_ZERO(&writeSet);
-            FD_SET(fd, &writeSet);
-            timeval tv = to_timeval(connectTimeoutMs_);
-            rc = ::select(fd + 1, nullptr, &writeSet, nullptr, &tv);
-            if (rc > 0) {
-                int soError = 0;
-                socklen_t len = sizeof(soError);
-                if (::getsockopt(fd, SOL_SOCKET, SO_ERROR, &soError, &len) == 0 && soError == 0) {
-                    connected = fd;
-                }
-            }
-        }
-
-        if (connected >= 0) {
-            if (flags >= 0) {
-                ::fcntl(connected, F_SETFL, flags);
-            }
-            timeval tv = to_timeval(commandTimeoutMs_);
-            ::setsockopt(connected, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-            ::setsockopt(connected, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
-            break;
-        }
-
-        ::close(fd);
-    }
-
-    ::freeaddrinfo(result);
-    return connected;
-}
-
-bool RedisCache::send_command(int fd, const std::vector<std::string>& command) const
-{
-    return send_all(fd, encode_command(command));
-}
-
-bool RedisCache::send_all(int fd, const std::string& data) const
-{
-    const char* ptr = data.data();
-    std::size_t remaining = data.size();
-    while (remaining > 0) {
-        ssize_t sent = ::send(fd, ptr, remaining, 0);
-        if (sent <= 0) {
-            return false;
-        }
-        ptr += sent;
-        remaining -= static_cast<std::size_t>(sent);
-    }
-    return true;
-}
-
-bool RedisCache::read_reply(int fd, Reply& reply) const
-{
-    char prefix = '\0';
-    if (read(fd, &prefix, 1) != 1) {
-        return false;
-    }
-
-    std::string line;
-    if (prefix == '+') {
-        if (!read_line(fd, line)) {
-            return false;
-        }
-        reply.type = Reply::Type::SimpleString;
-        reply.text = line;
-        return true;
-    }
-
-    if (prefix == '-') {
-        if (!read_line(fd, line)) {
-            return false;
-        }
-        reply.type = Reply::Type::Error;
-        reply.text = line;
-        return true;
-    }
-
-    if (prefix == ':') {
-        if (!read_line(fd, line)) {
-            return false;
-        }
-        reply.type = Reply::Type::Integer;
-        reply.integer = std::stoll(line);
-        return true;
-    }
-
-    if (prefix == '$') {
-        if (!read_line(fd, line)) {
-            return false;
-        }
-        long long size = std::stoll(line);
-        if (size < 0) {
-            reply.type = Reply::Type::Nil;
-            return true;
-        }
-
-        std::string payload;
-        if (!read_exact(fd, static_cast<std::size_t>(size), payload)) {
-            return false;
-        }
-        std::string crlf;
-        if (!read_exact(fd, 2, crlf) || crlf != "\r\n") {
-            return false;
-        }
-        reply.type = Reply::Type::BulkString;
-        reply.text = std::move(payload);
-        return true;
-    }
-
-    reply.type = Reply::Type::Invalid;
-    return false;
-}
-
-bool RedisCache::read_line(int fd, std::string& line) const
-{
-    line.clear();
-    char ch = '\0';
-    while (true) {
-        ssize_t n = ::read(fd, &ch, 1);
-        if (n != 1) {
-            return false;
-        }
-        if (ch == '\r') {
-            n = ::read(fd, &ch, 1);
-            return n == 1 && ch == '\n';
-        }
-        line.push_back(ch);
-    }
-}
-
-bool RedisCache::read_exact(int fd, std::size_t size, std::string& output) const
-{
-    output.assign(size, '\0');
-    std::size_t readBytes = 0;
-    while (readBytes < size) {
-        ssize_t n = ::read(fd, output.data() + readBytes, size - readBytes);
-        if (n <= 0) {
-            return false;
-        }
-        readBytes += static_cast<std::size_t>(n);
-    }
-    return true;
+    // SELECT 失败时返回 false，外层会把本次 Redis 操作当作失败处理。
+    RedisReplyPtr reply(static_cast<redisReply*>(
+        redisCommand(context, "SELECT %d", db_)));
+    return reply != nullptr && reply->type != REDIS_REPLY_ERROR;
 }

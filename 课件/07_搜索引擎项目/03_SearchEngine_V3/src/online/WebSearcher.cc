@@ -13,6 +13,12 @@
 
 namespace
 {
+/**
+ * @brief 将 Document 序列化为 JSON 字符串。
+ *
+ * 文档缓存只需要保存展示需要的字段。使用 JSON 而不是手写分隔符，可以避免正文
+ * 中本身包含换行、冒号等字符时产生解析歧义。
+ */
 std::string serialize_document(const Document& doc)
 {
     nlohmann::json json;
@@ -23,6 +29,12 @@ std::string serialize_document(const Document& doc)
     return json.dump();
 }
 
+/**
+ * @brief 从文档缓存中的 JSON 字符串还原 Document。
+ *
+ * Redis 或本地缓存中可能存在旧版本/损坏数据，因此解析失败时返回 false，
+ * 调用方会退回到 PageLibrary 按需读取。
+ */
 bool deserialize_document(const std::string& text, Document& doc)
 {
     try {
@@ -81,8 +93,12 @@ void WebSearcher::set_detail_cache(Cache* cache,
                                    int documentTtlSeconds,
                                    int abstractTtlSeconds)
 {
+    // WebSearcher 不拥有 cache，只保存指针。cache 的实际生命周期由 online_main 中的
+    // unique_ptr 管理，并覆盖 WebSearcher 的整个使用周期。
     detailCache_ = cache;
+    // 缓存版本为空时使用 default，避免生成形如 "v::doc:1" 的 key。
     cacheVersion_ = cacheVersion.empty() ? "default" : std::move(cacheVersion);
+    // TTL 原样保存。具体 ttlSeconds <= 0 的“永不过期”语义由 Cache 实现处理。
     documentCacheTtlSeconds_ = documentTtlSeconds;
     abstractCacheTtlSeconds_ = abstractTtlSeconds;
 }
@@ -347,15 +363,21 @@ bool WebSearcher::get_document(int docId, Document& doc) const
         std::string cached;
         std::string key = build_document_cache_key(docId);
         if (detailCache_->get(key, cached) && deserialize_document(cached, doc)) {
+            // 文档展示信息缓存命中后，不再打开 pages.dat。对于热点搜索结果，
+            // 这能减少随机文件读取和 XML 解析成本。
             return true;
         }
     }
 
+    // 缓存未命中或缓存内容解析失败时，回到按需读取流程：
+    // PageLibrary 根据 offsets_ 找到 docId 的字节范围，再从 pages.dat 中读取单篇 XML。
     if (!pageLibrary_.find(docId, doc)) {
         return false;
     }
 
     if (detailCache_ != nullptr) {
+        // 回源成功后写入缓存。这里缓存的是完整 Document JSON，后续同一 docId 的
+        // 不同查询都可以复用标题、链接和正文。
         detailCache_->put(build_document_cache_key(docId),
                           serialize_document(doc),
                           documentCacheTtlSeconds_);
@@ -366,16 +388,21 @@ bool WebSearcher::get_document(int docId, Document& doc) const
 std::string WebSearcher::get_abstract(const Document& doc,
                                       const std::vector<std::string>& keywords) const
 {
+    // 动态摘要不仅与 docId 有关，还与本次查询关键词和摘要长度有关。
+    // 因此 key 必须包含这些信息，避免不同查询复用错误摘要。
     std::string key = build_abstract_cache_key(doc.id, keywords);
     if (detailCache_ != nullptr) {
         std::string cached;
         if (detailCache_->get(key, cached)) {
+            // 摘要是普通字符串，命中后直接返回即可。
             return cached;
         }
     }
 
+    // 未命中时实时生成动态摘要。DynamicAbstract 会围绕关键词选择较相关片段。
     std::string abstract = DynamicAbstract::generate(doc.content, keywords, abstractLength_);
     if (detailCache_ != nullptr) {
+        // 摘要生成成功后写入缓存，后续相同 docId + keywords + length 可以直接复用。
         detailCache_->put(key, abstract, abstractCacheTtlSeconds_);
     }
     return abstract;
@@ -384,6 +411,7 @@ std::string WebSearcher::get_abstract(const Document& doc,
 std::string WebSearcher::build_document_cache_key(int docId) const
 {
     std::ostringstream oss;
+    // 文档内容来自离线网页库。cacheVersion_ 变化时，旧网页库对应的文档缓存自然失效。
     oss << "v:" << cacheVersion_ << ":doc:" << docId;
     return oss.str();
 }
@@ -392,6 +420,8 @@ std::string WebSearcher::build_abstract_cache_key(int docId,
                                                   const std::vector<std::string>& keywords) const
 {
     std::ostringstream oss;
+    // 摘要 key 由版本、业务类型、docId、摘要长度和关键词序列组成。
+    // keyword.size() 可以减少简单字符串拼接产生的边界歧义。
     oss << "v:" << cacheVersion_
         << ":abstract:" << docId
         << ':' << abstractLength_;

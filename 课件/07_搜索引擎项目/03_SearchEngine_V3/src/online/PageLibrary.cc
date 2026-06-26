@@ -59,24 +59,30 @@ void PageLibrary::load(const std::string& pagesFile, const std::string& offsetsF
  */
 bool PageLibrary::find(int docId, Document& doc) const
 {
+    // offsets_ 在 load() 后只读，多个线程并发查找不会修改容器。
     auto it = offsets_.find(docId);
     if (it == offsets_.end()) {
         return false;
     }
 
+    // 每次查询都创建局部 ifstream。不同线程拥有不同文件流对象，避免共享 seekg
+    // 位置造成并发读取互相影响。
     std::ifstream ifs(pagesFile_, std::ios::binary);
     if (!ifs) {
         throw std::runtime_error("failed to open pages file: " + pagesFile_);
     }
 
     const PageOffset& offset = it->second;
+    // 先按 length 分配目标字符串。std::string 可以保存 '\0' 字节，适合二进制读取。
     std::string xmlText(offset.length, '\0');
+    // seekg 将读取位置移动到单篇文档起始偏移；read 再精确读取 length 个字节。
     ifs.seekg(static_cast<std::streamoff>(offset.offset));
     ifs.read(xmlText.data(), static_cast<std::streamsize>(offset.length));
     if (!ifs) {
         throw std::runtime_error("failed to read page fragment from: " + pagesFile_);
     }
 
+    // 只解析当前 docId 对应的 XML 片段，避免启动时全量解析 pages.dat。
     doc = parse_document(xmlText);
     return doc.id != 0;
 }

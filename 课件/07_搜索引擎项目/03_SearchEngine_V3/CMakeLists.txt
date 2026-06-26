@@ -2,7 +2,7 @@
 cmake_minimum_required(VERSION 3.16)
 
 # 项目名称和语言(其中 CXX 表示 C++)
-project(SearchEngineV2 LANGUAGES CXX)
+project(SearchEngineV3 LANGUAGES CXX)
 
 # 指定项目使用 C++17 标准
 set(CMAKE_CXX_STANDARD 17)
@@ -59,6 +59,9 @@ add_executable(search_server
 # 查找 tinyxml2 库
 find_library(TINYXML2_LIB tinyxml2)
 
+# 查找 hiredis 库，Redis L2 缓存使用 hiredis 同步客户端。
+find_library(HIREDIS_LIB hiredis)
+
 # 查找 muduo 网络库。muduo_net 依赖 muduo_base，最终还需要 pthread。
 find_library(MUDUO_NET_LIB muduo_net)
 find_library(MUDUO_BASE_LIB muduo_base)
@@ -93,6 +96,12 @@ else()
     # message(FATAL_ERROR "...") 表示输出错误信息并终止配置过程
     message(FATAL_ERROR "tinyxml2 library not found. Please install libtinyxml2-dev or add tinyxml2.cpp manually.")
 
+endif()
+
+if (HIREDIS_LIB)
+    target_link_libraries(search_server PRIVATE ${HIREDIS_LIB})
+else()
+    message(FATAL_ERROR "hiredis library not found. Please install hiredis or add its library path.")
 endif()
 
 if (MUDUO_NET_LIB AND MUDUO_BASE_LIB)

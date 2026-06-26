@@ -53,10 +53,11 @@ int get_int_or(const Config& config, const std::string& key, int fallback)
 }
 
 /**
- * @brief 搜索引擎第二期在线服务入口。
+ * @brief 搜索引擎第三期在线服务入口。
  *
- * 程序启动后先加载一期生成的词典、索引和网页库，再启动 muduo TCP 服务。
- * 第二期暂不实现缓存，所有在线查询只读取启动时加载好的共享数据。
+ * 程序启动后先加载一期生成的词典、索引和偏移库，再按配置组装 L1/L2 缓存，
+ * 最后启动 muduo TLV 服务和 HTTP 服务。网页库正文在第三期改为按需读取，
+ * 热点文档和摘要由缓存保存。
  */
 int main()
 {
@@ -76,6 +77,8 @@ int main()
                          config.get("en_dict_index"));
 
         // 网页搜索依赖网页库、偏移库、倒排索引和中文停用词。
+        // PageLibrary::load 在第三期只加载偏移库并记录 pages.dat 路径，
+        // 不再把网页正文全量读入内存。
         WebSearcher searcher;
         searcher.load(config.get("pages"),
                       config.get("offsets"),
@@ -95,6 +98,11 @@ int main()
         // 摘要长度属于 WebSearcher 的运行参数，加载索引后再设置即可。
         searcher.set_abstract_length(abstractLength);
 
+        // 缓存相关配置分为三类：
+        // 1. 总开关和 L1/L2 开关；
+        // 2. 容量、分片数、TTL 等缓存策略；
+        // 3. Redis 连接参数。
+        // get_int_or 允许旧配置文件不包含第三期新增字段，缺失时使用默认值。
         int cacheEnabled = get_int_or(config, "cache_enabled", 1);
         int l1CacheEnabled = get_int_or(config, "l1_cache_enabled", 1);
         int l1CacheCapacity = get_int_or(config, "l1_cache_capacity", 4096);
@@ -114,16 +122,23 @@ int main()
         int redisCommandTimeout = get_int_or(config, "redis_command_timeout_ms", 20);
         int redisBackfillTtl = get_int_or(config, "redis_l1_backfill_ttl_seconds", l1CacheTtl);
 
+        // unique_ptr 负责缓存对象生命周期。后面传给业务模块的是裸指针 Cache*，
+        // 但实际对象一直由这些 unique_ptr 持有，直到 main 退出。
         std::unique_ptr<ShardedLruCache> l1Cache;
         std::unique_ptr<RedisCache> redisCache;
         std::unique_ptr<TwoLevelCache> twoLevelCache;
+        // cache 始终指向“最终对外使用的缓存”：可能是 L1、Redis、TwoLevelCache，
+        // 也可能保持 nullptr 表示完全关闭缓存。
         Cache* cache = nullptr;
         if (cacheEnabled != 0 && l1CacheEnabled != 0) {
+            // 容量和分片数不能为 0。配置非法时回退默认值，避免后续取模或淘汰逻辑异常。
             l1CacheCapacity = l1CacheCapacity > 0 ? l1CacheCapacity : 4096;
             l1CacheShards = l1CacheShards > 0 ? l1CacheShards : 32;
+            // make_unique 创建对象并返回 unique_ptr，异常时不会泄漏内存。
             l1Cache = std::make_unique<ShardedLruCache>(
                 static_cast<std::size_t>(l1CacheCapacity),
                 static_cast<std::size_t>(l1CacheShards));
+            // 如果后面没有 Redis 或 TwoLevelCache，这个指针就是最终缓存。
             cache = l1Cache.get();
             std::cout << "[Cache] L1 enabled, capacity=" << l1Cache->capacity()
                       << ", shards=" << l1Cache->shard_count()
@@ -135,6 +150,8 @@ int main()
         }
 
         if (cacheEnabled != 0 && redisCacheEnabled != 0) {
+            // RedisCache 内部使用 hiredis 短连接。这里构造对象不立即长期持有连接，
+            // 具体 Redis 异常会在 get/put/erase 时降级为缓存未命中或写入失败。
             redisCache = std::make_unique<RedisCache>(redisHost,
                                                       redisPort,
                                                       redisDb,
@@ -148,13 +165,17 @@ int main()
 
         if (cacheEnabled != 0) {
             if (l1Cache != nullptr && redisCache != nullptr) {
+                // 同时启用 L1 和 Redis 时，用 TwoLevelCache 组合成统一 Cache 接口。
+                // 业务层不需要知道内部是“先查本地再查 Redis”的二级结构。
                 twoLevelCache = std::make_unique<TwoLevelCache>(l1Cache.get(),
                                                                 redisCache.get(),
                                                                 redisBackfillTtl);
                 cache = twoLevelCache.get();
             } else if (redisCache != nullptr) {
+                // 只启用 Redis 时直接把 Redis 当作统一缓存。
                 cache = redisCache.get();
             } else if (l1Cache != nullptr) {
+                // 只启用 L1 时直接使用本地缓存。
                 cache = l1Cache.get();
             } else {
                 std::cout << "[Cache] disabled" << std::endl;
@@ -163,11 +184,18 @@ int main()
             std::cout << "[Cache] disabled" << std::endl;
         }
 
+        // 细粒度缓存由 WebSearcher 内部使用：
+        // 1. document cache：docId -> 文档展示信息，避免频繁从 pages.dat 按需读取；
+        // 2. abstract cache：docId + query keywords -> 动态摘要，避免重复生成片段。
         searcher.set_detail_cache(cache,
                                   cacheVersion,
                                   documentCacheTtl,
                                   abstractCacheTtl);
 
+        // CachedSearchService 是更外层的业务结果缓存：
+        // 1. suggest(query, lang, topK) -> 推荐 JSON；
+        // 2. search(query, topK) -> 搜索 JSON。
+        // 它还负责 singleflight、空结果缓存、TTL 抖动和命中率统计。
         CachedSearchService cachedService(recommender,
                                           searcher,
                                           cache,

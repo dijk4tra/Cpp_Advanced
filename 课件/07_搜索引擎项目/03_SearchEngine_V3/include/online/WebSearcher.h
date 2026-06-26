@@ -137,16 +137,24 @@ private:
     // 中文停用词集合，用于过滤查询中的高频低信息量词语。
     std::set<std::string> stopWords_;
 
-    // 已加载到内存的网页库和偏移库。
+    // 网页库访问器。第三期中它只把偏移库加载到内存，正文按 docId 从 pages.dat 按需读取。
     PageLibrary pageLibrary_;
 
     // word -> docId -> normalized TF-IDF weight。
     std::unordered_map<std::string, PostingMap> invertedIndex_;
 
+    // 动态摘要最大长度，既影响展示结果，也参与摘要缓存 key。
     int abstractLength_ = 150;
 
+    // 文档展示信息和动态摘要共用的缓存接口。为空表示关闭细粒度缓存。
     Cache* detailCache_ = nullptr;
+
+    // 细粒度缓存版本，离线网页库重建后应更新，避免读取旧文档/旧摘要。
     std::string cacheVersion_ = "default";
+
+    // 文档缓存 TTL。文档展示信息只随离线数据变化，通常可以比搜索结果缓存更稳定。
     int documentCacheTtlSeconds_ = 600;
+
+    // 摘要缓存 TTL。摘要与查询关键词相关，数量可能更多，因此单独配置。
     int abstractCacheTtlSeconds_ = 600;
 };
