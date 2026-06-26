@@ -43,6 +43,10 @@ add_executable(search_server
     src/online/online_main.cc
     src/common/Config.cc
     src/common/TextUtils.cc
+    src/cache/ShardedLruCache.cc
+    src/cache/RedisCache.cc
+    src/cache/TwoLevelCache.cc
+    src/cache/CachedSearchService.cc
     src/online/ProtocolCodec.cc
     src/online/SearchServer.cc
     src/online/KeywordRecommender.cc

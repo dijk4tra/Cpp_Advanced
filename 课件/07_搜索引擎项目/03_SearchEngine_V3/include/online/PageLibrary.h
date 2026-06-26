@@ -44,35 +44,38 @@ struct PageOffset
 };
 
 /**
- * @brief 加载一期生成的网页库和偏移库。
+ * @brief 加载一期生成的网页库路径和偏移库。
  *
- * 当前课程语料规模不大，因此启动时直接把网页解析到内存，查询时不再反复读
- * 磁盘。偏移库仍用于从 pages.dat 中准确切出每一篇 <doc> 片段。
+ * 第三期改为按需读取网页库：启动时只加载 offsets.dat，并保存 pages.dat 路径。
+ * 查询展示某篇文档时，再根据 docId 的 offset/length 从 pages.dat 切出对应
+ * `<doc>` 片段并解析。热点文档由上层缓存保存，避免重新回到全量加载内存。
  *
- * load() 完成后，find() 只做哈希表查询，不修改内部状态，可以被搜索线程并发
- * 读取。第二期暂不实现按需加载或缓存淘汰。
+ * load() 完成后，offsets_ 和 pagesFile_ 只读；find() 每次打开独立 ifstream，
+ * 因此多个搜索线程可并发读取不同文档。
  */
 class PageLibrary
 {
 public:
     /**
-     * @brief 加载 offsets.dat 和 pages.dat。
+     * @brief 加载 offsets.dat 并记录 pages.dat 路径。
      * @param pagesFile 网页库路径。
      * @param offsetsFile 偏移库路径。
-     * @throws std::runtime_error 文件无法打开或网页片段无法读取时抛出。
+     * @throws std::runtime_error offsets 文件无法打开，或 pages 文件不可读时抛出。
      */
     void load(const std::string& pagesFile, const std::string& offsetsFile);
 
     /**
-     * @brief 根据文档 id 查询文档。
-     * @return 找到时返回 Document 指针，否则返回 nullptr。
+     * @brief 根据文档 id 按需读取并解析文档。
+     * @param docId 文档 id。
+     * @param doc 输出文档。
+     * @return 找到且解析成功返回 true，否则返回 false。
      */
-    const Document* find(int docId) const;
+    bool find(int docId, Document& doc) const;
 
     /**
-     * @brief 返回已加载文档数量。
+     * @brief 返回偏移库中文档数量。
      */
-    std::size_t size() const { return documents_.size(); }
+    std::size_t size() const { return offsets_.size(); }
 
 private:
     /**
@@ -90,9 +93,9 @@ private:
     Document parse_document(const std::string& xmlText) const;
 
 private:
+    // 网页库文件路径。查询时根据 offsets_ 中的字节范围按需读取该文件。
+    std::string pagesFile_;
+
     // docId -> 在 pages.dat 中的位置和长度。
     std::unordered_map<int, PageOffset> offsets_;
-
-    // docId -> 已解析好的文档内容。查询阶段直接读该表。
-    std::unordered_map<int, Document> documents_;
 };

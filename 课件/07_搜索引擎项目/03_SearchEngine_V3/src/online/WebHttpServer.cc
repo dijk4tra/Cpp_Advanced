@@ -118,17 +118,15 @@ std::string guess_content_type(const std::string& path)
  */
 WebHttpServer::WebHttpServer(muduo::net::EventLoop* loop,
                              const muduo::net::InetAddress& listenAddr,
-                             KeywordRecommender& recommender,
-                             WebSearcher& searcher,
+                             CachedSearchService& service,
                              const std::string& wwwRoot,
                              int httpThreads,
                              int keywordTopK,
                              int webTopK)
     // server_ 构造时就绑定 EventLoop、监听地址和服务名。
     : server_(loop, listenAddr, "WebHttpServer")
-    // recommender_ 和 searcher_ 是引用成员，必须在初始化列表中绑定到外部对象。
-    , recommender_(recommender)
-    , searcher_(searcher)
+    // service_ 是引用成员，必须在初始化列表中绑定到外部对象。
+    , service_(service)
     , wwwRoot_(wwwRoot)
     , keywordTopK_(keywordTopK)
     , webTopK_(webTopK)
@@ -306,10 +304,10 @@ std::string WebHttpServer::handle_api(const HttpRequest& request, bool keywordMo
     if (keywordMode) {
         // /api/suggest 复用 KeywordRecommender。浏览器端只提交 query，推荐数量
         // 固定使用服务端配置，语言由 KeywordRecommender 自动判断。
-        body = recommender_.recommend_json(query, "", keywordTopK_);
+        body = service_.suggest(query, "", keywordTopK_);
     } else {
         // /api/search 复用 WebSearcher。浏览器端不再传 topk，搜索数量由配置控制。
-        body = searcher_.search_json(query, webTopK_);
+        body = service_.search(query, webTopK_);
     }
 
     return make_response(200, "OK", "application/json; charset=utf-8", body);

@@ -1,4 +1,8 @@
 #include "../../include/common/Config.h"
+#include "../../include/cache/CachedSearchService.h"
+#include "../../include/cache/RedisCache.h"
+#include "../../include/cache/ShardedLruCache.h"
+#include "../../include/cache/TwoLevelCache.h"
 #include "../../include/online/KeywordRecommender.h"
 #include "../../include/online/SearchServer.h"
 #include "../../include/online/WebHttpServer.h"
@@ -10,6 +14,7 @@
 #include <cstdint>
 #include <exception>
 #include <iostream>
+#include <memory>
 #include <string>
 
 namespace
@@ -60,7 +65,7 @@ int main()
         // Config 是栈对象，main 结束时自动析构。
         Config config("conf/config.conf");
 
-        std::cout << "========== SearchEngine V2 Online Server ==========" << std::endl;
+        std::cout << "========== SearchEngine V3 Online Server ==========" << std::endl;
 
         // 关键字推荐依赖一期离线生成的中英文词典和字符索引。
         KeywordRecommender recommender;
@@ -86,8 +91,92 @@ int main()
         int webTopK = get_int_or(config, "web_topk", 33);
         int maxMessageSize = get_int_or(config, "max_message_size", 1024 * 1024);
         std::string wwwRoot = get_or(config, "www_root", "www");
+        int abstractLength = get_int_or(config, "abstract_length", 150);
         // 摘要长度属于 WebSearcher 的运行参数，加载索引后再设置即可。
-        searcher.set_abstract_length(get_int_or(config, "abstract_length", 150));
+        searcher.set_abstract_length(abstractLength);
+
+        int cacheEnabled = get_int_or(config, "cache_enabled", 1);
+        int l1CacheEnabled = get_int_or(config, "l1_cache_enabled", 1);
+        int l1CacheCapacity = get_int_or(config, "l1_cache_capacity", 4096);
+        int l1CacheShards = get_int_or(config, "l1_cache_shards", 32);
+        int l1CacheTtl = get_int_or(config, "l1_cache_ttl_seconds", 600);
+        int l1EmptyTtl = get_int_or(config, "l1_empty_ttl_seconds", 60);
+        int documentCacheTtl = get_int_or(config, "document_cache_ttl_seconds", 600);
+        int abstractCacheTtl = get_int_or(config, "abstract_cache_ttl_seconds", 600);
+        int cacheStatsInterval = get_int_or(config, "cache_stats_log_interval", 100);
+        int cacheTtlJitter = get_int_or(config, "cache_ttl_jitter_seconds", 30);
+        std::string cacheVersion = get_or(config, "cache_version", "search_engine_v3_001");
+        int redisCacheEnabled = get_int_or(config, "redis_cache_enabled", 0);
+        std::string redisHost = get_or(config, "redis_host", "127.0.0.1");
+        int redisPort = get_int_or(config, "redis_port", 6379);
+        int redisDb = get_int_or(config, "redis_db", 0);
+        int redisConnectTimeout = get_int_or(config, "redis_connect_timeout_ms", 20);
+        int redisCommandTimeout = get_int_or(config, "redis_command_timeout_ms", 20);
+        int redisBackfillTtl = get_int_or(config, "redis_l1_backfill_ttl_seconds", l1CacheTtl);
+
+        std::unique_ptr<ShardedLruCache> l1Cache;
+        std::unique_ptr<RedisCache> redisCache;
+        std::unique_ptr<TwoLevelCache> twoLevelCache;
+        Cache* cache = nullptr;
+        if (cacheEnabled != 0 && l1CacheEnabled != 0) {
+            l1CacheCapacity = l1CacheCapacity > 0 ? l1CacheCapacity : 4096;
+            l1CacheShards = l1CacheShards > 0 ? l1CacheShards : 32;
+            l1Cache = std::make_unique<ShardedLruCache>(
+                static_cast<std::size_t>(l1CacheCapacity),
+                static_cast<std::size_t>(l1CacheShards));
+            cache = l1Cache.get();
+            std::cout << "[Cache] L1 enabled, capacity=" << l1Cache->capacity()
+                      << ", shards=" << l1Cache->shard_count()
+                      << ", ttl=" << l1CacheTtl
+                      << ", empty_ttl=" << l1EmptyTtl
+                      << std::endl;
+        } else {
+            std::cout << "[Cache] L1 disabled" << std::endl;
+        }
+
+        if (cacheEnabled != 0 && redisCacheEnabled != 0) {
+            redisCache = std::make_unique<RedisCache>(redisHost,
+                                                      redisPort,
+                                                      redisDb,
+                                                      redisConnectTimeout,
+                                                      redisCommandTimeout);
+            std::cout << "[Cache] Redis L2 enabled, host=" << redisHost
+                      << ", port=" << redisPort
+                      << ", db=" << redisDb
+                      << std::endl;
+        }
+
+        if (cacheEnabled != 0) {
+            if (l1Cache != nullptr && redisCache != nullptr) {
+                twoLevelCache = std::make_unique<TwoLevelCache>(l1Cache.get(),
+                                                                redisCache.get(),
+                                                                redisBackfillTtl);
+                cache = twoLevelCache.get();
+            } else if (redisCache != nullptr) {
+                cache = redisCache.get();
+            } else if (l1Cache != nullptr) {
+                cache = l1Cache.get();
+            } else {
+                std::cout << "[Cache] disabled" << std::endl;
+            }
+        } else {
+            std::cout << "[Cache] disabled" << std::endl;
+        }
+
+        searcher.set_detail_cache(cache,
+                                  cacheVersion,
+                                  documentCacheTtl,
+                                  abstractCacheTtl);
+
+        CachedSearchService cachedService(recommender,
+                                          searcher,
+                                          cache,
+                                          cacheVersion,
+                                          l1CacheTtl,
+                                          l1EmptyTtl,
+                                          abstractLength,
+                                          cacheStatsInterval,
+                                          cacheTtlJitter);
 
         // 两个服务器共用同一个 EventLoop：
         // 1. SearchServer 监听 TLV 端口，供课程协议客户端使用；
@@ -97,8 +186,7 @@ int main()
         muduo::net::InetAddress listenAddr(ip, static_cast<uint16_t>(port));
         SearchServer server(&loop,
                             listenAddr,
-                            recommender,
-                            searcher,
+                            cachedService,
                             ioThreads,
                             // maxMessageSize 配置读出是 int，ProtocolCodec 需要 uint32_t。
                             static_cast<uint32_t>(maxMessageSize),
@@ -108,8 +196,7 @@ int main()
         muduo::net::InetAddress httpListenAddr(ip, static_cast<uint16_t>(httpPort));
         WebHttpServer httpServer(&loop,
                                  httpListenAddr,
-                                 recommender,
-                                 searcher,
+                                 cachedService,
                                  wwwRoot,
                                  httpThreads,
                                  keywordTopK,

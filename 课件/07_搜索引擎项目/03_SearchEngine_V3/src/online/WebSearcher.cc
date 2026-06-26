@@ -9,6 +9,34 @@
 #include <nlohmann/json.hpp>
 #include <sstream>
 #include <stdexcept>
+#include <utility>
+
+namespace
+{
+std::string serialize_document(const Document& doc)
+{
+    nlohmann::json json;
+    json["id"] = doc.id;
+    json["title"] = doc.title;
+    json["link"] = doc.link;
+    json["content"] = doc.content;
+    return json.dump();
+}
+
+bool deserialize_document(const std::string& text, Document& doc)
+{
+    try {
+        nlohmann::json json = nlohmann::json::parse(text);
+        doc.id = json.value("id", 0);
+        doc.title = json.value("title", "");
+        doc.link = json.value("link", "");
+        doc.content = json.value("content", "");
+        return doc.id != 0;
+    } catch (const std::exception&) {
+        return false;
+    }
+}
+}
 
 /**
  * @brief 构造网页搜索器并初始化 cppjieba。
@@ -43,6 +71,20 @@ void WebSearcher::set_abstract_length(int length)
 {
     // 摘要长度必须为正数；非法配置统一回退到 150，保持结果可读。
     abstractLength_ = length > 0 ? length : 150;
+}
+
+/**
+ * @brief 设置文档和动态摘要缓存。
+ */
+void WebSearcher::set_detail_cache(Cache* cache,
+                                   std::string cacheVersion,
+                                   int documentTtlSeconds,
+                                   int abstractTtlSeconds)
+{
+    detailCache_ = cache;
+    cacheVersion_ = cacheVersion.empty() ? "default" : std::move(cacheVersion);
+    documentCacheTtlSeconds_ = documentTtlSeconds;
+    abstractCacheTtlSeconds_ = abstractTtlSeconds;
 }
 
 /**
@@ -126,18 +168,18 @@ std::string WebSearcher::search_json(const std::string& query, int topK) const
     // topK 可能大于实际结果数，取二者较小值避免数组越界。
     int count = std::min(topK, static_cast<int>(results.size()));
     for (int i = 0; i < count; ++i) {
-        const Document* doc = pageLibrary_.find(results[i].docId);
-        if (doc == nullptr) {
+        Document doc;
+        if (!get_document(results[i].docId, doc)) {
             continue;
         }
 
         // initializer list 构造一个 JSON object，再追加到 results 数组中。
         response["results"].push_back({
-            {"id", doc->id},
-            {"title", doc->title},
-            {"link", doc->link},
+            {"id", doc.id},
+            {"title", doc.title},
+            {"link", doc.link},
             // 摘要在查询时动态生成，因此可以围绕本次关键词截取最相关片段。
-            {"abstract", DynamicAbstract::generate(doc->content, keywords, abstractLength_)},
+            {"abstract", get_abstract(doc, keywords)},
             {"score", results[i].score}
         });
     }
@@ -297,4 +339,64 @@ std::set<int> WebSearcher::find_candidate_docs(const std::map<std::string, doubl
     }
 
     return candidates;
+}
+
+bool WebSearcher::get_document(int docId, Document& doc) const
+{
+    if (detailCache_ != nullptr) {
+        std::string cached;
+        std::string key = build_document_cache_key(docId);
+        if (detailCache_->get(key, cached) && deserialize_document(cached, doc)) {
+            return true;
+        }
+    }
+
+    if (!pageLibrary_.find(docId, doc)) {
+        return false;
+    }
+
+    if (detailCache_ != nullptr) {
+        detailCache_->put(build_document_cache_key(docId),
+                          serialize_document(doc),
+                          documentCacheTtlSeconds_);
+    }
+    return true;
+}
+
+std::string WebSearcher::get_abstract(const Document& doc,
+                                      const std::vector<std::string>& keywords) const
+{
+    std::string key = build_abstract_cache_key(doc.id, keywords);
+    if (detailCache_ != nullptr) {
+        std::string cached;
+        if (detailCache_->get(key, cached)) {
+            return cached;
+        }
+    }
+
+    std::string abstract = DynamicAbstract::generate(doc.content, keywords, abstractLength_);
+    if (detailCache_ != nullptr) {
+        detailCache_->put(key, abstract, abstractCacheTtlSeconds_);
+    }
+    return abstract;
+}
+
+std::string WebSearcher::build_document_cache_key(int docId) const
+{
+    std::ostringstream oss;
+    oss << "v:" << cacheVersion_ << ":doc:" << docId;
+    return oss.str();
+}
+
+std::string WebSearcher::build_abstract_cache_key(int docId,
+                                                  const std::vector<std::string>& keywords) const
+{
+    std::ostringstream oss;
+    oss << "v:" << cacheVersion_
+        << ":abstract:" << docId
+        << ':' << abstractLength_;
+    for (const auto& keyword : keywords) {
+        oss << ':' << keyword.size() << ':' << keyword;
+    }
+    return oss.str();
 }

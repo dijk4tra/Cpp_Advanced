@@ -4,7 +4,6 @@
 #include <sstream>
 #include <stdexcept>
 #include <tinyxml2.h>
-#include <utility>
 
 namespace
 {
@@ -38,58 +37,48 @@ std::string element_text(tinyxml2::XMLElement* parent, const char* childName)
 }
 
 /**
- * @brief 将网页库和偏移库加载到内存。
- * @throws std::runtime_error 文件无法打开或读取片段失败时抛出。
+ * @brief 加载偏移库并记录网页库文件路径。
+ * @throws std::runtime_error offsets 文件无法打开，或 pages 文件不可读时抛出。
  */
 void PageLibrary::load(const std::string& pagesFile, const std::string& offsetsFile)
 {
-    // 先加载偏移库，得到每篇文档在 pages.dat 中的字节范围。
+    pagesFile_ = pagesFile;
+
+    // 先验证 pages.dat 可读。真正读取文档发生在 find()，这里不全量解析网页库。
+    std::ifstream pageCheck(pagesFile_, std::ios::binary);
+    if (!pageCheck) {
+        throw std::runtime_error("failed to open pages file: " + pagesFile_);
+    }
+
+    // 加载偏移库，得到每篇文档在 pages.dat 中的字节范围。
     load_offsets(offsetsFile);
-    // 如果未来重复调用 load()，先清空旧文档，避免新旧数据混在一起。
-    documents_.clear();
-
-    // pages.dat 按字节偏移读取，必须用二进制模式打开，避免换行转换影响 seekg。
-    // ifstream 使用 RAII 管理文件，函数结束时会自动关闭文件。
-    std::ifstream ifs(pagesFile, std::ios::binary);
-    if (!ifs) {
-        throw std::runtime_error("failed to open pages file: " + pagesFile);
-    }
-
-    // structured binding：const auto& [docId, offset] 将 map/unordered_map 中的
-    // key 和 value 拆成两个名字。这里 docId 当前没有直接使用，offset 保存读取范围。
-    for (const auto& [docId, offset] : offsets_) {
-        // offset.length 是该 doc XML 片段的字节长度。先创建等长字符串作为读取缓冲区。
-        // '\0' 只是初始填充值，read() 会用文件内容覆盖这段缓冲区。
-        std::string xmlText(offset.length, '\0');
-        // seekg 移动文件读指针到指定字节偏移，read 再读取固定长度。
-        ifs.seekg(static_cast<std::streamoff>(offset.offset));
-        ifs.read(xmlText.data(), static_cast<std::streamsize>(offset.length));
-        if (!ifs) {
-            throw std::runtime_error("failed to read page fragment from: " + pagesFile);
-        }
-
-        Document doc = parse_document(xmlText);
-        if (doc.id != 0) {
-            // 用 XML 内部的 id 作为 key，与倒排索引中的 docId 保持一致。
-            // std::move 表示把 doc 中的字符串资源移动进哈希表，避免复制正文大字符串。
-            documents_[doc.id] = std::move(doc);
-        }
-    }
 }
 
 /**
- * @brief 根据文档 id 查找已加载文档。
+ * @brief 根据文档 id 按需读取文档。
  */
-const Document* PageLibrary::find(int docId) const
+bool PageLibrary::find(int docId, Document& doc) const
 {
-    // find 不会在 key 不存在时插入新元素，比 operator[] 更适合只读查询。
-    auto it = documents_.find(docId);
-    if (it == documents_.end()) {
-        return nullptr;
+    auto it = offsets_.find(docId);
+    if (it == offsets_.end()) {
+        return false;
     }
-    // 返回指向哈希表内部 Document 的指针。只要 PageLibrary 不被销毁且 documents_
-    // 不被修改，该指针就保持有效。在线查询阶段 documents_ 只读。
-    return &it->second;
+
+    std::ifstream ifs(pagesFile_, std::ios::binary);
+    if (!ifs) {
+        throw std::runtime_error("failed to open pages file: " + pagesFile_);
+    }
+
+    const PageOffset& offset = it->second;
+    std::string xmlText(offset.length, '\0');
+    ifs.seekg(static_cast<std::streamoff>(offset.offset));
+    ifs.read(xmlText.data(), static_cast<std::streamsize>(offset.length));
+    if (!ifs) {
+        throw std::runtime_error("failed to read page fragment from: " + pagesFile_);
+    }
+
+    doc = parse_document(xmlText);
+    return doc.id != 0;
 }
 
 /**

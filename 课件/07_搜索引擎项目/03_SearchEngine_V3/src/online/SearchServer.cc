@@ -27,8 +27,7 @@ constexpr uint8_t kErrorResponse = 100;
  */
 SearchServer::SearchServer(muduo::net::EventLoop* loop,
                            const muduo::net::InetAddress& listenAddr,
-                           KeywordRecommender& recommender,
-                           WebSearcher& searcher,
+                           CachedSearchService& service,
                            int ioThreads,
                            uint32_t maxMessageSize,
                            int keywordTopK,
@@ -36,9 +35,8 @@ SearchServer::SearchServer(muduo::net::EventLoop* loop,
     // 成员初始化列表会在进入构造函数函数体之前初始化成员。
     // server_ 没有默认构造后再设置监听地址的过程，因此必须在这里直接构造。
     : server_(loop, listenAddr, "SearchServer")
-    // recommender_ 和 searcher_ 是引用成员，引用成员也必须在初始化列表中绑定。
-    , recommender_(recommender)
-    , searcher_(searcher)
+    // service_ 是引用成员，必须在初始化列表中绑定。
+    , service_(service)
     , maxMessageSize_(maxMessageSize)
     , keywordTopK_(keywordTopK)
     , webTopK_(webTopK)
@@ -119,13 +117,13 @@ std::string SearchServer::handle_request(uint8_t type, const std::string& value,
         std::string lang = request.value("lang", "");
         // TLV 客户端可以在请求 JSON 中传 topk；未传时使用服务端配置默认值。
         int topK = request.value("topk", keywordTopK_);
-        return recommender_.recommend_json(query, lang, topK);
+        return service_.suggest(query, lang, topK);
     }
 
     if (type == kWebRequest) {
         // TLV 客户端可以在请求 JSON 中传 topk；未传时使用服务端配置默认值。
         int topK = request.value("topk", webTopK_);
-        return searcher_.search_json(query, topK);
+        return service_.search(query, topK);
     }
 
     responseType = kErrorResponse;

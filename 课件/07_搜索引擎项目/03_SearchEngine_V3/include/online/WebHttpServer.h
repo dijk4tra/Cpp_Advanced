@@ -1,7 +1,6 @@
 #pragma once
 
-#include "../../include/online/KeywordRecommender.h"
-#include "../../include/online/WebSearcher.h"
+#include "../cache/CachedSearchService.h"
 
 #include <muduo/net/TcpServer.h>
 
@@ -29,8 +28,7 @@ public:
      *
      * @param loop 主事件循环，由 main 创建并负责 loop()。
      * @param listenAddr HTTP 服务监听地址。
-     * @param recommender 关键字推荐模块引用，供 /api/suggest 使用。
-     * @param searcher 网页搜索模块引用，供 /api/search 使用。
+     * @param service 带缓存的搜索服务，供 /api/suggest 和 /api/search 使用。
      * @param wwwRoot 前端静态文件根目录。
      * @param httpThreads HTTP 服务的 muduo 工作线程数。
      * @param keywordTopK HTTP 关键字推荐返回数量，来自服务端配置。
@@ -38,8 +36,7 @@ public:
      */
     WebHttpServer(muduo::net::EventLoop* loop,
                   const muduo::net::InetAddress& listenAddr,
-                  KeywordRecommender& recommender,
-                  WebSearcher& searcher,
+                  CachedSearchService& service,
                   const std::string& wwwRoot,
                   int httpThreads,
                   int keywordTopK,
@@ -136,9 +133,8 @@ private:
     // muduo TCP 服务对象，HTTP 端口和 TLV 端口分别由两个 TcpServer 监听。
     muduo::net::TcpServer server_;
 
-    // 与 TLV 服务共享的业务模块，避免重复加载词典、网页库和倒排索引。
-    KeywordRecommender& recommender_;
-    WebSearcher& searcher_;
+    // 与 TLV 服务共享的带缓存业务服务。
+    CachedSearchService& service_;
 
     // 前端静态文件目录，一般为项目根目录下的 www。
     std::string wwwRoot_;

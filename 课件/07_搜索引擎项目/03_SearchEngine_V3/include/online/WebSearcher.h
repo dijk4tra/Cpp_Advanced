@@ -2,6 +2,7 @@
 
 #include "DynamicAbstract.h"
 #include "PageLibrary.h"
+#include "../cache/Cache.h"
 
 #include <cppjieba/Jieba.hpp>
 #include <map>
@@ -64,6 +65,18 @@ public:
     void set_abstract_length(int length);
 
     /**
+     * @brief 设置文档展示信息和动态摘要片段缓存。
+     * @param cache 缓存对象，可为 nullptr；为空时不启用细粒度缓存。
+     * @param cacheVersion 缓存版本，用于隔离离线重建后的旧数据。
+     * @param documentTtlSeconds 文档缓存 TTL。
+     * @param abstractTtlSeconds 动态摘要缓存 TTL。
+     */
+    void set_detail_cache(Cache* cache,
+                          std::string cacheVersion,
+                          int documentTtlSeconds,
+                          int abstractTtlSeconds);
+
+    /**
      * @brief 搜索网页并生成 JSON 响应。
      * @param query 用户查询语句。
      * @param topK 返回结果数。
@@ -102,6 +115,21 @@ private:
      */
     std::set<int> find_candidate_docs(const std::map<std::string, double>& queryVector) const;
 
+    /**
+     * @brief 获取文档，优先读取文档缓存，未命中时按需读取网页库。
+     */
+    bool get_document(int docId, Document& doc) const;
+
+    /**
+     * @brief 获取动态摘要，优先读取摘要缓存，未命中时实时生成。
+     */
+    std::string get_abstract(const Document& doc,
+                             const std::vector<std::string>& keywords) const;
+
+    std::string build_document_cache_key(int docId) const;
+    std::string build_abstract_cache_key(int docId,
+                                         const std::vector<std::string>& keywords) const;
+
 private:
     // cppjieba 的初始化成本较高，作为成员在服务生命周期内复用。
     cppjieba::Jieba tokenizer_;
@@ -116,4 +144,9 @@ private:
     std::unordered_map<std::string, PostingMap> invertedIndex_;
 
     int abstractLength_ = 150;
+
+    Cache* detailCache_ = nullptr;
+    std::string cacheVersion_ = "default";
+    int documentCacheTtlSeconds_ = 600;
+    int abstractCacheTtlSeconds_ = 600;
 };

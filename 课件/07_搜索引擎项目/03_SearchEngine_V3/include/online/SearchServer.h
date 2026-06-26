@@ -1,7 +1,6 @@
 #pragma once
 
-#include "KeywordRecommender.h"
-#include "WebSearcher.h"
+#include "../cache/CachedSearchService.h"
 
 #include <muduo/net/TcpServer.h>
 
@@ -12,8 +11,8 @@
  * @brief 基于 muduo 的在线搜索服务器。
  *
  * SearchServer 只负责网络层和业务分发：收到 TLV 请求后解析 JSON，再根据
- * type 调用关键字推荐或网页搜索模块。两个业务模块的数据均在启动阶段加载，
- * 查询阶段只读，不在第二期引入缓存。
+ * type 调用带缓存的搜索服务。关键词推荐、网页搜索和缓存读写都集中在
+ * CachedSearchService 中，网络层只负责协议解析和响应发送。
  *
  * 该服务监听配置项 server_port，专门提供课程要求的 TLV 协议接口；浏览器测试
  * 使用 WebHttpServer 的 HTTP 端口，两者共享同一份业务对象。
@@ -26,8 +25,7 @@ public:
      *
      * @param loop 主事件循环，由 main 创建并负责 loop()。
      * @param listenAddr TLV 服务监听地址。
-     * @param recommender 关键字推荐模块引用，生命周期必须长于 SearchServer。
-     * @param searcher 网页搜索模块引用，生命周期必须长于 SearchServer。
+     * @param service 带缓存的搜索服务，生命周期必须长于 SearchServer。
      * @param ioThreads muduo 工作线程数。
      * @param maxMessageSize TLV value 最大字节数。
      * @param keywordTopK 关键字推荐默认返回数量，请求 JSON 可用 topk 覆盖。
@@ -35,8 +33,7 @@ public:
      */
     SearchServer(muduo::net::EventLoop* loop,
                  const muduo::net::InetAddress& listenAddr,
-                 KeywordRecommender& recommender,
-                 WebSearcher& searcher,
+                 CachedSearchService& service,
                  int ioThreads,
                  uint32_t maxMessageSize,
                  int keywordTopK,
@@ -81,9 +78,8 @@ private:
     // muduo TCP 服务对象，负责监听、连接管理和线程池调度。
     muduo::net::TcpServer server_;
 
-    // 业务模块引用。第二期查询阶段只读，不在 server 内部复制大索引。
-    KeywordRecommender& recommender_;
-    WebSearcher& searcher_;
+    // 带缓存的业务服务引用，不在 server 内部复制大索引或缓存。
+    CachedSearchService& service_;
 
     // 单条 TLV value 允许的最大字节数，防止异常客户端发送过大的消息。
     uint32_t maxMessageSize_;
