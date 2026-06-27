@@ -122,7 +122,8 @@ WebHttpServer::WebHttpServer(muduo::net::EventLoop* loop,
                              const std::string& wwwRoot,
                              int httpThreads,
                              int keywordTopK,
-                             int webTopK)
+                             int webTopK,
+                             std::size_t maxRequestSize)
     // server_ 构造时就绑定 EventLoop、监听地址和服务名。
     : server_(loop, listenAddr, "WebHttpServer")
     // service_ 是引用成员，必须在初始化列表中绑定到外部对象。
@@ -130,6 +131,7 @@ WebHttpServer::WebHttpServer(muduo::net::EventLoop* loop,
     , wwwRoot_(wwwRoot)
     , keywordTopK_(keywordTopK)
     , webTopK_(webTopK)
+    , maxRequestSize_(maxRequestSize > 0 ? maxRequestSize : 1024 * 1024)
 {
     // 与 TLV 服务一样，HTTP 服务也基于 muduo TcpServer；区别只是上层协议解析。
     // 成员函数作为回调时，需要通过 std::bind 绑定 this 指针。
@@ -153,11 +155,11 @@ void WebHttpServer::start()
  */
 void WebHttpServer::on_connection(const muduo::net::TcpConnectionPtr& conn)
 {
-    // connected() 为 true 表示新连接建立；为 false 表示连接断开。
+    // 逐连接日志在高并发短连接压测中开销明显，降为 DEBUG 后默认 INFO 级别不输出。
     if (conn->connected()) {
-        LOG_INFO << "http client connected: " << conn->peerAddress().toIpPort();
+        LOG_DEBUG << "http client connected: " << conn->peerAddress().toIpPort();
     } else {
-        LOG_INFO << "http client disconnected: " << conn->peerAddress().toIpPort();
+        LOG_DEBUG << "http client disconnected: " << conn->peerAddress().toIpPort();
     }
 }
 
@@ -169,18 +171,21 @@ void WebHttpServer::on_message(const muduo::net::TcpConnectionPtr& conn,
                                muduo::Timestamp)
 {
     try {
-        HttpRequest request;
-        if (!try_parse_request(buffer, request)) {
-            // HTTP 请求头或 body 尚未完整到达，保留 Buffer 内容等待下一次回调。
-            return;
-        }
+        while (true) {
+            HttpRequest request;
+            if (!try_parse_request(buffer, request)) {
+                // HTTP 请求头或 body 尚未完整到达，保留 Buffer 内容等待下一次回调。
+                return;
+            }
 
-        // 当前实现采用短连接响应。这样不需要处理 keep-alive、多请求管线化等复杂
-        // HTTP 行为，更适合课程项目里作为浏览器测试入口。
-        // send() 只是把数据交给 muduo 发送缓冲区，不要求当前函数阻塞等待发送完成。
-        conn->send(handle_request(request));
-        // shutdown() 表示发送完响应后关闭写端。浏览器看到 Connection: close 后也会关闭连接。
-        conn->shutdown();
+            conn->send(handle_request(request));
+            if (!request.keepAlive) {
+                conn->shutdown();
+                return;
+            }
+            // keep-alive 连接继续解析 Buffer 中可能已经到达的下一条请求；当前没有
+            // 完整请求时，下一轮 try_parse_request() 返回 false 并等待后续回调。
+        }
     } catch (const std::exception& ex) {
         // JSON 解析失败、路径非法、Content-Length 非法等异常统一返回 400。
         conn->send(make_json_error(400, ex.what()));
@@ -199,8 +204,14 @@ bool WebHttpServer::try_parse_request(muduo::net::Buffer* buffer, HttpRequest& r
     std::string raw(buffer->peek(), buffer->readableBytes());
     std::size_t headerEnd = raw.find("\r\n\r\n");
     if (headerEnd == std::string::npos) {
+        if (raw.size() > maxRequestSize_) {
+            throw std::runtime_error("http request header is too large");
+        }
         // 连 HTTP 头都没收完整，继续等待后续数据。
         return false;
+    }
+    if (headerEnd + 4 > maxRequestSize_) {
+        throw std::runtime_error("http request header is too large");
     }
 
     // headerEnd 指向 "\r\n\r\n" 的起始位置，substr(0, headerEnd) 正好取出所有请求头。
@@ -218,7 +229,8 @@ bool WebHttpServer::try_parse_request(muduo::net::Buffer* buffer, HttpRequest& r
     std::string version;
     // 请求行格式为：METHOD PATH HTTP/VERSION。当前只保存 method 和 path。
     lineStream >> request.method >> request.path >> version;
-    if (request.method.empty() || request.path.empty()) {
+    if (request.method.empty() || request.path.empty()
+        || (version != "HTTP/1.1" && version != "HTTP/1.0")) {
         throw std::runtime_error("bad http request line");
     }
 
@@ -251,6 +263,21 @@ bool WebHttpServer::try_parse_request(muduo::net::Buffer* buffer, HttpRequest& r
     if (lengthIt != request.headers.end()) {
         // stoul 把字符串转为无符号整数；格式非法时会抛异常，由上层返回 400。
         contentLength = static_cast<std::size_t>(std::stoul(lengthIt->second));
+    }
+    if (contentLength > maxRequestSize_ - (headerEnd + 4)) {
+        throw std::runtime_error("http request body is too large");
+    }
+
+    // HTTP/1.1 默认持久连接，HTTP/1.0 默认短连接；Connection 头可显式覆盖。
+    request.keepAlive = version == "HTTP/1.1";
+    auto connectionIt = request.headers.find("connection");
+    if (connectionIt != request.headers.end()) {
+        const std::string connection = lower_copy(connectionIt->second);
+        if (connection == "close") {
+            request.keepAlive = false;
+        } else if (connection == "keep-alive") {
+            request.keepAlive = true;
+        }
     }
 
     // HTTP 头和 body 之间的分隔符 "\r\n\r\n" 长度为 4。
@@ -288,7 +315,7 @@ std::string WebHttpServer::handle_request(const HttpRequest& request) const
 std::string WebHttpServer::handle_api(const HttpRequest& request, bool keywordMode) const
 {
     if (request.method != "POST") {
-        return make_json_error(405, "api only supports POST");
+        return make_json_error(405, "api only supports POST", request.keepAlive);
     }
 
     // 前端以 JSON body 传参。body 为空时按空对象处理，便于返回 query is empty。
@@ -297,7 +324,7 @@ std::string WebHttpServer::handle_api(const HttpRequest& request, bool keywordMo
     // value("query", "") 表示字段不存在时使用默认空字符串。
     std::string query = input.value("query", "");
     if (query.empty()) {
-        return make_json_error(400, "query is empty");
+        return make_json_error(400, "query is empty", request.keepAlive);
     }
 
     std::string body;
@@ -310,7 +337,8 @@ std::string WebHttpServer::handle_api(const HttpRequest& request, bool keywordMo
         body = service_.search(query, webTopK_);
     }
 
-    return make_response(200, "OK", "application/json; charset=utf-8", body);
+    return make_response(200, "OK", "application/json; charset=utf-8", body,
+                         request.keepAlive);
 }
 
 /**
@@ -320,7 +348,8 @@ std::string WebHttpServer::handle_static_file(const HttpRequest& request) const
 {
     if (request.method != "GET" && request.method != "HEAD") {
         // 静态资源只接受 GET/HEAD，不接受 POST。
-        return make_response(405, status_text(405), "text/plain; charset=utf-8", "method not allowed");
+        return make_response(405, status_text(405), "text/plain; charset=utf-8",
+                             "method not allowed", request.keepAlive);
     }
 
     std::string contentType;
@@ -329,7 +358,7 @@ std::string WebHttpServer::handle_static_file(const HttpRequest& request) const
         // HEAD 只返回响应头，不返回实体内容。
         body.clear();
     }
-    return make_response(200, "OK", contentType, body);
+    return make_response(200, "OK", contentType, body, request.keepAlive);
 }
 
 /**
@@ -338,7 +367,8 @@ std::string WebHttpServer::handle_static_file(const HttpRequest& request) const
 std::string WebHttpServer::make_response(int statusCode,
                                          const std::string& statusText,
                                          const std::string& contentType,
-                                         const std::string& body) const
+                                         const std::string& body,
+                                         bool keepAlive) const
 {
     std::ostringstream response;
     // HTTP 响应由状态行、多个响应头、一个空行和响应体组成。
@@ -346,8 +376,7 @@ std::string WebHttpServer::make_response(int statusCode,
     response << "HTTP/1.1 " << statusCode << ' ' << statusText << "\r\n"
              << "Content-Type: " << contentType << "\r\n"
              << "Content-Length: " << body.size() << "\r\n"
-             // 明确短连接，浏览器收到响应后不再复用该 TCP 连接。
-             << "Connection: close\r\n"
+             << "Connection: " << (keepAlive ? "keep-alive" : "close") << "\r\n"
              << "\r\n"
              << body;
     // str() 将字符串流中累积的内容一次性取出。
@@ -357,7 +386,9 @@ std::string WebHttpServer::make_response(int statusCode,
 /**
  * @brief 生成 JSON 错误响应。
  */
-std::string WebHttpServer::make_json_error(int statusCode, const std::string& message) const
+std::string WebHttpServer::make_json_error(int statusCode,
+                                           const std::string& message,
+                                           bool keepAlive) const
 {
     nlohmann::json error;
     error["error"] = "invalid request";
@@ -366,7 +397,8 @@ std::string WebHttpServer::make_json_error(int statusCode, const std::string& me
     return make_response(statusCode,
                          status_text(statusCode),
                          "application/json; charset=utf-8",
-                         error.dump());
+                         error.dump(),
+                         keepAlive);
 }
 
 /**

@@ -2,23 +2,13 @@
 
 #include <hiredis/hiredis.h>
 
+#include <chrono>
 #include <memory>
 #include <sys/time.h>
 #include <utility>
 
 namespace
 {
-// hiredis 的 redisContext 需要使用 redisFree() 释放。放进 unique_ptr 时，需要提供
-// 自定义 deleter，否则默认 deleter 会调用 delete，导致释放方式错误。
-struct RedisContextDeleter {
-    void operator()(redisContext* context) const
-    {
-        if (context != nullptr) {
-            redisFree(context);
-        }
-    }
-};
-
 // hiredis 的 redisReply 由 freeReplyObject() 释放，同样不能直接 delete。
 struct RedisReplyDeleter {
     void operator()(redisReply* reply) const
@@ -29,9 +19,7 @@ struct RedisReplyDeleter {
     }
 };
 
-// unique_ptr 的第二个模板参数是删除器类型。这样函数中只要创建 RedisContextPtr
-// 或 RedisReplyPtr，就能在离开作用域时自动释放 hiredis 资源。
-using RedisContextPtr = std::unique_ptr<redisContext, RedisContextDeleter>;
+// unique_ptr 使用自定义删除器，保证函数离开作用域时自动释放 reply。
 using RedisReplyPtr = std::unique_ptr<redisReply, RedisReplyDeleter>;
 
 /**
@@ -50,20 +38,34 @@ timeval to_timeval(int milliseconds)
 /**
  * @brief 构造 Redis 缓存客户端配置。
  *
- * 当前 RedisCache 不持有长连接，只保存连接参数。每次 get/put/erase 单独建连，
- * 简化多线程安全问题；后续如果需要更高性能，可以在这个类内部替换为连接池。
+ * 连接池采用惰性建连：只有首次并发访问需要时才创建连接，避免服务启动阶段因
+ * Redis 暂时不可用而失败。连接由池独占借出，因此 hiredis context 不会并发使用。
  */
 RedisCache::RedisCache(std::string host,
                        int port,
                        int db,
                        int connectTimeoutMs,
-                       int commandTimeoutMs)
+                       int commandTimeoutMs,
+                       int poolSize,
+                       int poolWaitTimeoutMs)
     : host_(std::move(host))
     , port_(port > 0 ? port : 6379)
     , db_(db >= 0 ? db : 0)
     , connectTimeoutMs_(connectTimeoutMs > 0 ? connectTimeoutMs : 20)
     , commandTimeoutMs_(commandTimeoutMs > 0 ? commandTimeoutMs : 20)
+    , poolSize_(static_cast<std::size_t>(poolSize > 0 ? poolSize : 16))
+    , poolWaitTimeoutMs_(poolWaitTimeoutMs > 0 ? poolWaitTimeoutMs : 20)
 {
+}
+
+RedisCache::~RedisCache()
+{
+    std::lock_guard<std::mutex> lock(poolMutex_);
+    for (redisContext* context : idleConnections_) {
+        redisFree(context);
+    }
+    idleConnections_.clear();
+    totalConnections_ = 0;
 }
 
 /**
@@ -71,22 +73,24 @@ RedisCache::RedisCache(std::string host,
  */
 bool RedisCache::get(const std::string& key, std::string& value)
 {
-    // 每次命令创建独立连接，RedisContextPtr 保证本函数结束时自动 redisFree。
-    RedisContextPtr context(connect());
-    if (context == nullptr || !select_db(context.get())) {
+    redisContext* context = acquire();
+    if (context == nullptr) {
         return false;
     }
 
     // hiredis 的 redisCommand 支持 printf 风格格式串。%b 表示“二进制安全字符串”，
     // 后面必须传 data 指针和长度，适合保存 JSON 等可能包含空字节以外任意内容的值。
     RedisReplyPtr reply(static_cast<redisReply*>(
-        redisCommand(context.get(), "GET %b", key.data(), key.size())));
+        redisCommand(context, "GET %b", key.data(), key.size())));
+    const bool healthy = reply != nullptr && context->err == 0;
     if (reply == nullptr || reply->type != REDIS_REPLY_STRING) {
+        release(context, healthy);
         return false;
     }
 
     // redisReply 的 str 不保证按 C 字符串处理安全，使用 len 构造 std::string。
     value.assign(reply->str, reply->len);
+    release(context, healthy);
     return true;
 }
 
@@ -95,32 +99,28 @@ bool RedisCache::get(const std::string& key, std::string& value)
  */
 void RedisCache::put(const std::string& key, const std::string& value, int ttlSeconds)
 {
-    RedisContextPtr context(connect());
-    if (context == nullptr || !select_db(context.get())) {
+    redisContext* context = acquire();
+    if (context == nullptr) {
         return;
     }
 
+    RedisReplyPtr reply;
     if (ttlSeconds > 0) {
         // SETEX key seconds value：写入并设置过期时间。key 和 value 都用 %b，
         // 避免因为字符串中出现特殊字符而被 hiredis 按普通 C 字符串截断。
-        RedisReplyPtr reply(static_cast<redisReply*>(
-            redisCommand(context.get(),
+        reply.reset(static_cast<redisReply*>(
+            redisCommand(context,
                          "SETEX %b %d %b",
-                         key.data(),
-                         key.size(),
-                         ttlSeconds,
-                         value.data(),
-                         value.size())));
+                         key.data(), key.size(), ttlSeconds,
+                         value.data(), value.size())));
     } else {
         // ttlSeconds <= 0 与本项目 Cache 接口约定一致，表示不过期，因此使用 SET。
-        RedisReplyPtr reply(static_cast<redisReply*>(
-            redisCommand(context.get(),
+        reply.reset(static_cast<redisReply*>(
+            redisCommand(context,
                          "SET %b %b",
-                         key.data(),
-                         key.size(),
-                         value.data(),
-                         value.size())));
+                         key.data(), key.size(), value.data(), value.size())));
     }
+    release(context, reply != nullptr && context->err == 0);
 }
 
 /**
@@ -128,13 +128,14 @@ void RedisCache::put(const std::string& key, const std::string& value, int ttlSe
  */
 void RedisCache::erase(const std::string& key)
 {
-    RedisContextPtr context(connect());
-    if (context == nullptr || !select_db(context.get())) {
+    redisContext* context = acquire();
+    if (context == nullptr) {
         return;
     }
 
     RedisReplyPtr reply(static_cast<redisReply*>(
-        redisCommand(context.get(), "DEL %b", key.data(), key.size())));
+        redisCommand(context, "DEL %b", key.data(), key.size())));
+    release(context, reply != nullptr && context->err == 0);
 }
 
 /**
@@ -162,7 +163,62 @@ redisContext* RedisCache::connect() const
         return nullptr;
     }
 
+    if (!select_db(context)) {
+        redisFree(context);
+        return nullptr;
+    }
+
     return context;
+}
+
+redisContext* RedisCache::acquire()
+{
+    std::unique_lock<std::mutex> lock(poolMutex_);
+    const auto ready = [this]() {
+        return !idleConnections_.empty() || totalConnections_ < poolSize_;
+    };
+    if (!poolCondition_.wait_for(lock,
+                                 std::chrono::milliseconds(poolWaitTimeoutMs_),
+                                 ready)) {
+        return nullptr;
+    }
+
+    if (!idleConnections_.empty()) {
+        redisContext* context = idleConnections_.back();
+        idleConnections_.pop_back();
+        return context;
+    }
+
+    // 先预留容量，再在锁外执行可能阻塞的 TCP 建连。其他线程可以并行创建剩余连接，
+    // 但 totalConnections_ 的预留保证连接总数不会超过 poolSize_。
+    ++totalConnections_;
+    lock.unlock();
+    redisContext* context = connect();
+    if (context != nullptr) {
+        return context;
+    }
+
+    lock.lock();
+    --totalConnections_;
+    lock.unlock();
+    poolCondition_.notify_one();
+    return nullptr;
+}
+
+void RedisCache::release(redisContext* context, bool healthy)
+{
+    if (context == nullptr) {
+        return;
+    }
+
+    std::lock_guard<std::mutex> lock(poolMutex_);
+    if (healthy && context->err == 0) {
+        idleConnections_.push_back(context);
+    } else {
+        redisFree(context);
+        --totalConnections_;
+    }
+    poolCondition_.notify_one();
 }
 
 /**

@@ -87,6 +87,23 @@ if (BUILD_TESTING)
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests/cache_policy
     )
     add_test(NAME cache_policy_benchmark COMMAND cache_policy_benchmark)
+
+    # 使用当前真实离线索引验证网页搜索的召回语义：部分 OOV 仍可返回结果，
+    # 多个有效查询词采用 posting list 并集，而不是严格 AND 交集。
+    add_executable(web_searcher_recall_test
+        tests/web_searcher_recall_test.cc
+        src/common/TextUtils.cc
+        src/online/PageLibrary.cc
+        src/online/DynamicAbstract.cc
+        src/online/WebSearcher.cc
+    )
+    target_compile_definitions(web_searcher_recall_test PRIVATE
+        SEARCH_ENGINE_TEST_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
+    )
+    set_target_properties(web_searcher_recall_test PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests/online
+    )
+    add_test(NAME web_searcher_recall_test COMMAND web_searcher_recall_test)
 endif()
 
 # 查找 tinyxml2 库
@@ -120,6 +137,9 @@ if (TINYXML2_LIB)
 
     target_link_libraries(offline_builder PRIVATE ${TINYXML2_LIB})
     target_link_libraries(search_server PRIVATE ${TINYXML2_LIB})
+    if (BUILD_TESTING)
+        target_link_libraries(web_searcher_recall_test PRIVATE ${TINYXML2_LIB})
+    endif()
 
     # 手写 g++ 命令里的 -lpthread、-ltinyxml2、-lmysqlclient、-lssl、-lcrypto
     # 在 CMakeLists.txt 中主要通过 target_link_libraries 来添加。

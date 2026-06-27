@@ -5,7 +5,6 @@
 #include <algorithm>
 #include <cmath>
 #include <fstream>
-#include <iterator>
 #include <nlohmann/json.hpp>
 #include <sstream>
 #include <stdexcept>
@@ -66,14 +65,26 @@ WebSearcher::WebSearcher()
 void WebSearcher::load(const std::string& pages,
                        const std::string& offsets,
                        const std::string& invertIndex,
+                       const std::string& docStats,
                        const std::string& stopWords)
 {
-    // 加载顺序：停用词用于查询分词过滤；网页库用于结果展示；倒排索引用于召回
-    // 和打分。三者都在服务启动阶段一次性加载完成。
+    // 加载顺序：停用词用于查询分词过滤；网页库用于结果展示；文档统计和倒排
+    // 索引用于 BM25 召回与打分。四者都在服务启动阶段一次性加载完成。
     // 启动阶段加载失败直接抛异常，避免服务器带着不完整索引继续运行。
     stopWords_ = TextUtils::load_stop_words(stopWords);
     pageLibrary_.load(pages, offsets);
+    load_document_stats(docStats);
+
+    if (documentCount_ != static_cast<int>(pageLibrary_.size())) {
+        throw std::runtime_error("BM25 stats document count does not match page library");
+    }
     load_inverted_index(invertIndex);
+}
+
+void WebSearcher::set_bm25_parameters(double k1, double b)
+{
+    bm25K1_ = k1 > 0.0 ? k1 : 1.5;
+    bm25B_ = b >= 0.0 && b <= 1.0 ? b : 0.75;
 }
 
 /**
@@ -123,15 +134,15 @@ std::string WebSearcher::search_json(const std::string& query, int topK) const
         return response.dump();
     }
 
-    // 第二步：把查询词频转成归一化 TF-IDF 向量。
-    std::map<std::string, double> queryVector = build_query_vector(termCount);
-    if (queryVector.empty()) {
-        // 任一查询词不在倒排索引中，或向量无法归一化时都没有候选结果。
+    // 第二步：忽略 OOV，保留倒排索引中存在的查询词。
+    std::vector<std::string> queryTerms = find_valid_query_terms(termCount);
+    if (queryTerms.empty()) {
+        // 查询中没有任何已登录词时没有候选结果。
         return response.dump();
     }
 
-    // 第三步：取所有查询词 posting list 的交集，得到候选文档集合。
-    std::set<int> candidateDocs = find_candidate_docs(queryVector);
+    // 第三步：取所有有效查询词 posting list 的并集，得到 OR 召回候选集合。
+    std::set<int> candidateDocs = find_candidate_docs(queryTerms);
     if (candidateDocs.empty()) {
         return response.dump();
     }
@@ -146,20 +157,10 @@ std::string WebSearcher::search_json(const std::string& query, int topK) const
     for (int docId : candidateDocs) {
         double score = 0.0;
 
-        // 文档向量在一期已经按 L2 范数归一化。查询向量在 build_query_vector()
-        // 中也已归一化，因此余弦相似度可直接按点积计算。
-        // structured binding 写法 `const auto& [word, queryWeight]` 可以把 map 的
-        // key/value 拆成两个变量名，代码比 first/second 更直观。
-        for (const auto& [word, queryWeight] : queryVector) {
-            auto wordIt = invertedIndex_.find(word);
-            if (wordIt == invertedIndex_.end()) {
-                continue;
-            }
-            auto docIt = wordIt->second.find(docId);
-            if (docIt != wordIt->second.end()) {
-                // 点积公式：score += 查询词权重 * 文档中该词权重。
-                score += queryWeight * docIt->second;
-            }
+        // 每个有效查询词分别贡献 BM25 分数。未出现在当前文档中的词贡献 0；
+        // 同时命中更多词的文档通常会累积更高分数。
+        for (const auto& term : queryTerms) {
+            score += bm25_term_score(term, docId);
         }
 
         // 使用列表初始化构造 SearchResult。
@@ -175,12 +176,6 @@ std::string WebSearcher::search_json(const std::string& query, int topK) const
         return lhs.docId < rhs.docId;
     });
 
-    std::vector<std::string> keywords;
-    // 动态摘要需要知道本次查询有哪些有效关键词，用于窗口打分和高亮。
-    for (const auto& [word, weight] : queryVector) {
-        keywords.push_back(word);
-    }
-
     // topK 可能大于实际结果数，取二者较小值避免数组越界。
     int count = std::min(topK, static_cast<int>(results.size()));
     for (int i = 0; i < count; ++i) {
@@ -195,7 +190,7 @@ std::string WebSearcher::search_json(const std::string& query, int topK) const
             {"title", doc.title},
             {"link", doc.link},
             // 摘要在查询时动态生成，因此可以围绕本次关键词截取最相关片段。
-            {"abstract", get_abstract(doc, keywords)},
+            {"abstract", get_abstract(doc, queryTerms)},
             {"score", results[i].score}
         });
     }
@@ -220,20 +215,58 @@ void WebSearcher::load_inverted_index(const std::string& filename)
     while (std::getline(ifs, line)) {
         std::istringstream iss(line);
         std::string word;
-        // 每行格式：word docId weight docId weight ...
-        iss >> word;
-        if (word.empty()) {
+        // 每行格式：word df docId tf docId tf ...
+        std::size_t expectedDf = 0;
+        iss >> word >> expectedDf;
+        if (word.empty() || expectedDf == 0) {
             continue;
+        }
+        if (expectedDf > static_cast<std::size_t>(documentCount_)) {
+            throw std::runtime_error("BM25 posting df exceeds document count for term: " + word);
         }
 
         int docId = 0;
-        double weight = 0.0;
-        // 一行中可能有多个 docId/weight 对，循环读到本行结束为止。
-        while (iss >> docId >> weight) {
-            // 离线阶段已经对文档 TF-IDF 向量做过 L2 归一化，weight 可直接用于点积。
-            // invertedIndex_[word] 不存在时会自动创建一个空 PostingMap。
-            invertedIndex_[word][docId] = weight;
+        int tf = 0;
+        std::size_t actualDf = 0;
+        while (iss >> docId >> tf) {
+            if (docId <= 0 || docId > documentCount_ || tf <= 0) {
+                throw std::runtime_error("invalid BM25 posting in: " + filename);
+            }
+            invertedIndex_[word][docId] = tf;
+            ++actualDf;
         }
+        if (actualDf != expectedDf || invertedIndex_[word].size() != expectedDf) {
+            throw std::runtime_error("BM25 posting df mismatch for term: " + word);
+        }
+    }
+}
+
+void WebSearcher::load_document_stats(const std::string& filename)
+{
+    std::ifstream ifs(filename);
+    if (!ifs) {
+        throw std::runtime_error("failed to open BM25 document stats: " + filename);
+    }
+
+    std::string magic;
+    if (!(ifs >> magic >> documentCount_ >> averageDocumentLength_)
+        || magic != "BM25_STATS_V1"
+        || documentCount_ <= 0
+        || averageDocumentLength_ <= 0.0) {
+        throw std::runtime_error("invalid BM25 document stats header: " + filename);
+    }
+
+    documentLengths_.clear();
+    int docId = 0;
+    int documentLength = 0;
+    while (ifs >> docId >> documentLength) {
+        if (docId <= 0 || documentLength < 0) {
+            throw std::runtime_error("invalid BM25 document length in: " + filename);
+        }
+        documentLengths_[docId] = documentLength;
+    }
+    if (documentLengths_.size() != static_cast<std::size_t>(documentCount_)) {
+        throw std::runtime_error("BM25 document length count mismatch: " + filename);
     }
 }
 
@@ -263,98 +296,73 @@ std::map<std::string, int> WebSearcher::cut_query(const std::string& query) cons
 }
 
 /**
- * @brief 根据查询词频计算归一化 TF-IDF 查询向量。
+ * @brief 返回倒排索引中存在的查询词，忽略 OOV。
  */
-std::map<std::string, double> WebSearcher::build_query_vector(const std::map<std::string, int>& termCount) const
+std::vector<std::string> WebSearcher::find_valid_query_terms(
+    const std::map<std::string, int>& termCount) const
 {
-    std::map<std::string, double> queryVector;
-    double squareSum = 0.0;
-    int totalWords = 0;
-    // 先统计查询中的有效词总数，用于计算 TF。
+    std::vector<std::string> terms;
+    terms.reserve(termCount.size());
     for (const auto& [word, count] : termCount) {
-        totalWords += count;
-    }
-
-    // pageLibrary_.size() 是 size_t，转成 double 后参与 IDF 的浮点计算。
-    const double documentCount = static_cast<double>(pageLibrary_.size());
-    if (totalWords == 0 || documentCount == 0.0) {
-        return queryVector;
-    }
-
-    for (const auto& [word, count] : termCount) {
-        auto it = invertedIndex_.find(word);
-        if (it == invertedIndex_.end()) {
-            // PDF 主流程要求查询包含所有关键词的网页。任一词不在倒排索引中，
-            // 后续一定没有同时包含所有词的文档，直接返回空向量。
-            return {};
+        if (invertedIndex_.find(word) != invertedIndex_.end()) {
+            terms.push_back(word);
         }
-
-        // 查询 TF 使用词频 / 查询有效词总数。DF 由 posting list 长度推导，
-        // IDF 按第二期要求使用 log2(N / (DF + 1))。
-        // count 和 totalWords 都是整数，需要转成 double，否则会发生整数除法。
-        double tf = static_cast<double>(count) / totalWords;
-        double df = static_cast<double>(it->second.size());
-        double idf = std::log2(documentCount / (df + 1.0));
-        double weight = tf * idf;
-        queryVector[word] = weight;
-        // squareSum 是向量每个维度权重平方和，后面开方得到 L2 范数。
-        squareSum += weight * weight;
     }
-
-    double norm = std::sqrt(squareSum);
-    if (norm == 0.0) {
-        return {};
-    }
-
-    // 归一化后，查询向量和文档向量的余弦相似度可直接用点积计算。
-    for (auto& [word, weight] : queryVector) {
-        // auto& 允许直接修改 map 中保存的 weight。
-        weight /= norm;
-    }
-    return queryVector;
+    return terms;
 }
 
 /**
- * @brief 取所有查询词 posting list 的交集。
+ * @brief 取所有有效查询词 posting list 的并集。
  */
-std::set<int> WebSearcher::find_candidate_docs(const std::map<std::string, double>& queryVector) const
+std::set<int> WebSearcher::find_candidate_docs(
+    const std::vector<std::string>& queryTerms) const
 {
     std::set<int> candidates;
-    bool firstWord = true;
 
-    for (const auto& [word, weight] : queryVector) {
+    for (const auto& word : queryTerms) {
         auto wordIt = invertedIndex_.find(word);
         if (wordIt == invertedIndex_.end()) {
-            return {};
-        }
-
-        std::set<int> currentDocs;
-        for (const auto& [docId, docWeight] : wordIt->second) {
-            // 当前词的 posting map 中，每个 key 就是一篇包含该词的文档。
-            currentDocs.insert(docId);
-        }
-
-        if (firstWord) {
-            // 第一个词的 posting list 作为初始候选集合。
-            candidates.swap(currentDocs);
-            firstWord = false;
+            // queryTerms 正常情况下只包含已登录词。保留该检查以容忍不一致数据，
+            // 单个异常词不应让已经召回的候选文档全部失效。
             continue;
         }
 
-        // 后续每个词都与当前候选集合求交集，最终只保留同时包含所有查询词的文档。
-        std::set<int> intersection;
-        // set_intersection 要求输入区间有序。std::set 天然有序，正好满足要求。
-        // inserter 会把交集结果不断插入 intersection。
-        std::set_intersection(candidates.begin(), candidates.end(),
-                              currentDocs.begin(), currentDocs.end(),
-                              std::inserter(intersection, intersection.begin()));
-        candidates.swap(intersection);
-        if (candidates.empty()) {
-            return candidates;
+        for (const auto& [docId, docWeight] : wordIt->second) {
+            // OR 召回：当前词 posting list 中的每篇文档都加入候选集合。set 同时
+            // 完成跨词去重；文档命中多少查询词由后续点积得分自然体现。
+            candidates.insert(docId);
         }
     }
 
     return candidates;
+}
+
+double WebSearcher::bm25_term_score(const std::string& term, int docId) const
+{
+    auto termIt = invertedIndex_.find(term);
+    if (termIt == invertedIndex_.end()) {
+        return 0.0;
+    }
+    auto postingIt = termIt->second.find(docId);
+    if (postingIt == termIt->second.end()) {
+        return 0.0;
+    }
+    auto lengthIt = documentLengths_.find(docId);
+    if (lengthIt == documentLengths_.end()) {
+        return 0.0;
+    }
+
+    const double tf = static_cast<double>(postingIt->second);
+    const double df = static_cast<double>(termIt->second.size());
+    const double n = static_cast<double>(documentCount_);
+    const double dl = static_cast<double>(lengthIt->second);
+
+    // Robertson/Sparck Jones IDF 的正值平滑形式，避免高 DF 词产生负分。
+    const double idf = std::log(1.0 + (n - df + 0.5) / (df + 0.5));
+    const double lengthNormalization =
+        1.0 - bm25B_ + bm25B_ * dl / averageDocumentLength_;
+    const double denominator = tf + bm25K1_ * lengthNormalization;
+    return idf * tf * (bm25K1_ + 1.0) / denominator;
 }
 
 bool WebSearcher::get_document(int docId, Document& doc) const

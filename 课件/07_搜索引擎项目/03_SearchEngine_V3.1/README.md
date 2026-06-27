@@ -277,7 +277,7 @@ Output directories: data/dict, data/index
 ```text
 ========== SearchEngine V3 Online Server ==========
 [Cache] L1 enabled, capacity=4096, shards=32, ttl=600, empty_ttl=60
-[Cache] Redis L2 enabled, host=127.0.0.1, port=6379, db=0
+[Cache] Redis L2 enabled, host=127.0.0.1, port=6379, db=0, pool_size=16
 [Online] TLV listen on 0.0.0.0:8888
 [Online] Web listen on http://0.0.0.0:18888
 ```
@@ -310,12 +310,17 @@ cn_dict_index=data/index/index_cn.dat
 pages=data/index/pages.dat
 offsets=data/index/offsets.dat
 invert_index=data/index/invert_index.dat
+bm25_doc_stats=data/index/bm25_doc_stats.dat
+bm25_k1=1.5
+bm25_b=0.75
 
 server_ip=0.0.0.0
 server_port=8888
 http_port=18888
 io_threads=4
-http_threads=2
+http_threads=8
+http_max_request_size=1048576
+muduo_log_level=WARN
 max_message_size=1048576
 keyword_topk=10
 web_topk=33
@@ -327,7 +332,7 @@ www_root=www
 
 ```text
 cache_enabled=1
-cache_version=search_engine_v3_001
+cache_version=search_engine_v3_003_bm25
 
 l1_cache_enabled=1
 l1_cache_capacity=4096
@@ -350,6 +355,8 @@ redis_port=6379
 redis_db=0
 redis_connect_timeout_ms=20
 redis_command_timeout_ms=20
+redis_pool_size=16
+redis_pool_wait_timeout_ms=20
 redis_l1_backfill_ttl_seconds=600
 ```
 
@@ -376,6 +383,8 @@ redis_l1_backfill_ttl_seconds=600
 | `redis_host` / `redis_port` / `redis_db` | Redis 连接信息 |
 | `redis_connect_timeout_ms` | Redis 建连超时 |
 | `redis_command_timeout_ms` | Redis 命令读写超时 |
+| `redis_pool_size` | Redis 持久连接池最大连接数 |
+| `redis_pool_wait_timeout_ms` | 连接池耗尽时等待空闲连接的最长时间，超时后降级 |
 | `redis_l1_backfill_ttl_seconds` | Redis 命中后回填 L1 的 TTL |
 
 `Config` 解析规则：
@@ -410,6 +419,7 @@ data/index/index_cn.dat
 data/index/pages.dat
 data/index/offsets.dat
 data/index/invert_index.dat
+data/index/bm25_doc_stats.dat
 ```
 
 输出文件格式：
@@ -422,7 +432,8 @@ data/index/invert_index.dat
 | `index_cn.dat` | `character lineNo...` | 单个 UTF-8 汉字到中文词典行号的映射 |
 | `pages.dat` | 连续 `<doc>` 记录 | 去重后的网页库 |
 | `offsets.dat` | `docId offset length` | 每篇网页在 `pages.dat` 中的字节范围 |
-| `invert_index.dat` | `word docId weight ...` | 倒排索引，`weight` 是归一化 TF-IDF |
+| `invert_index.dat` | `word df docId tf ...` | BM25 倒排索引，保存文档频率和原始词频 |
+| `bm25_doc_stats.dat` | `BM25_STATS_V1 N avgdl` + `docId dl` | BM25 全库及逐文档长度统计 |
 
 词典字符索引里的 `lineNo` 从 `1` 开始。在线加载词典时保留 `dict[0]` 为空记录，使 `lineNo` 可以直接作为数组下标使用。
 
@@ -459,7 +470,7 @@ flowchart LR
 
 ### 5.3 网页搜索离线处理
 
-`PageProcessor` 负责生成网页库、偏移库和倒排索引。
+`PageProcessor` 负责生成网页库、偏移库、BM25 倒排索引和文档长度统计。
 
 ```mermaid
 flowchart TD
@@ -470,9 +481,9 @@ flowchart TD
     E --> F[写 pages.dat 和 offsets.dat]
     E --> G[Jieba 分词]
     G --> H[过滤停用词和噪声 token]
-    H --> I[计算 TF-IDF]
-    I --> J[L2 归一化]
-    J --> K[写 invert_index.dat]
+    H --> I[统计 tf/df/dl/N/avgdl]
+    I --> J[写 invert_index.dat]
+    I --> K[写 bm25_doc_stats.dat]
 ```
 
 网页提取规则：
@@ -490,18 +501,20 @@ topN = max(5, min(200, content.size() / 120))
 汉明距离 <= 3 视为重复
 ```
 
-倒排索引权重：
+离线阶段不再计算最终相关性分数，而是保存 BM25 的充分统计量：
 
 ```text
-TF  = count(word, doc) / docTotalWords(doc)
-IDF = log2(documentCount / (documentFrequency(word) + 1))
-w   = TF * IDF
+tf(term, doc) = 词项在文档中的原始出现次数
+df(term)      = 包含词项的文档数量
+dl(doc)       = 文档过滤后的有效 token 数
+N             = 去重后的文档总数
+avgdl         = 全库平均文档长度
 ```
 
-每篇文档的权重向量做 L2 归一化：
+倒排索引格式：
 
 ```text
-w'_i = w_i / sqrt(sum(w_j * w_j))
+word df docId tf [docId tf]...
 ```
 
 ## 6. 在线服务架构
@@ -575,7 +588,7 @@ classDiagram
 1. 词典库、字符索引和倒排索引启动后只读，可以被多个 muduo 工作线程共享。
 2. 网页正文不全量加载，`PageLibrary::find()` 每次创建局部 `ifstream` 按需读取，避免共享文件流位置。
 3. L1 缓存按 key 哈希分片，每个分片有独立互斥锁。
-4. Redis L2 使用 hiredis 短连接，每次命令独立连接，避免当前阶段共享连接状态。
+4. Redis L2 使用有上限的持久连接池，每条 hiredis 连接同一时刻只由一个线程独占使用。
 5. `CachedSearchService` 使用 singleflight 合并相同 key 的并发回源。
 
 ## 7. 缓存设计与实现
@@ -656,20 +669,22 @@ include/cache/RedisCache.h
 src/cache/RedisCache.cc
 ```
 
-当前 `RedisCache` 使用 hiredis 同步客户端：
+当前 `RedisCache` 使用 hiredis 同步客户端和惰性持久连接池：
 
-1. `redisConnectWithTimeout()` 建立连接。
+1. 首次需要时通过 `redisConnectWithTimeout()` 建立连接。
 2. `redisSetTimeout()` 设置命令读写超时。
 3. `SELECT` 切换 DB。
 4. `GET` 读取缓存。
 5. `SETEX` 或 `SET` 写入缓存。
 6. `DEL` 删除缓存。
 
-当前实现每次命令使用短连接。这样做牺牲了一部分 Redis 性能，但有三个优点：
+连接池行为：
 
-1. 不需要设计多线程共享连接池。
-2. 不会因为某条连接状态异常影响后续所有请求。
-3. Redis 只是加速层，短连接加小超时更容易保证主搜索流程可用。
+1. 每条连接借出期间只属于一个工作线程，避免并发使用 hiredis context。
+2. 命令完成后健康连接归还池中，不重复 TCP 握手和 `SELECT`。
+3. 池达到上限时只等待 `redis_pool_wait_timeout_ms`，超时后按缓存未命中降级。
+4. 命令失败或 context 异常时丢弃连接，后续请求惰性重建。
+5. 构造 `RedisCache` 时不强制连接 Redis，Redis 不可用不会阻止服务启动。
 
 Redis 异常处理：
 
@@ -803,7 +818,7 @@ flowchart TD
 
 ## 9. 在线网页搜索算法
 
-`WebSearcher` 使用“TF-IDF + 余弦相似度”的向量空间模型。
+`WebSearcher` 使用 BM25 排序，并保留忽略 OOV 的 OR 召回。
 
 查询流程：
 
@@ -811,48 +826,35 @@ flowchart TD
 flowchart TD
     A[query] --> B[Jieba 分词]
     B --> C[过滤停用词和噪声 token]
-    C --> D[统计查询词频]
-    D --> E[计算查询 TF-IDF]
-    E --> F[查询向量 L2 归一化]
-    F --> G[从倒排索引取 posting list]
-    G --> H[求所有查询词文档交集]
-    H --> I{交集为空?}
+    C --> D[忽略 OOV]
+    D --> G[从倒排索引取 posting list]
+    G --> H[忽略 OOV 并合并有效词文档集合]
+    H --> I{并集为空?}
     I -- 是 --> R[返回空 results]
-    I -- 否 --> J[点积计算余弦相似度]
+    I -- 否 --> J[使用 tf/df/dl/avgdl/N 计算 BM25]
     J --> K[按 score 排序]
     K --> L[获取文档展示信息]
     L --> M[生成或读取动态摘要]
     M --> N[返回 JSON]
 ```
 
-查询词 IDF：
+BM25 公式：
 
 ```text
-DF = 倒排索引中该词 posting list 的长度
-N  = PageLibrary 偏移库中文档数量
-IDF = log2(N / (DF + 1))
+IDF(q) = ln(1 + (N - df(q) + 0.5) / (df(q) + 0.5))
+
+score(q,d) = IDF(q) * tf(q,d) * (k1 + 1)
+             / (tf(q,d) + k1 * (1 - b + b * dl(d) / avgdl))
 ```
 
-查询向量权重：
-
-```text
-TF = 查询词出现次数 / 查询有效词总数
-weight = TF * IDF
-```
+当前默认 `k1=1.5`、`b=0.75`，可通过配置修改。平滑后的 IDF 始终为正。
 
 文档召回规则：
 
-1. 每个查询词必须存在于倒排索引。
-2. 对所有查询词的 posting list 求文档 id 交集。
-3. 如果交集为空，返回空数组。
-
-相似度计算：
-
-离线倒排索引中的文档权重已经归一化，在线查询向量也归一化，所以余弦相似度直接使用点积：
-
-```text
-score = sum(queryWeight(word) * docWeight(word))
-```
+1. 查询词不在倒排索引时作为 OOV 跳过，不影响其他有效词。
+2. 对所有有效查询词的 posting list 求文档 id 并集，执行 OR 召回。
+3. 只有全部查询词均为 OOV 或并集为空时返回空数组。
+4. 每个命中词分别贡献 BM25 分数，多词得分累加。
 
 排序规则：
 
@@ -998,6 +1000,11 @@ TLV 外层消息格式：
 2. 提供 HTTP API：`POST /api/suggest`、`POST /api/search`。
 
 HTTP API 不通过 Python 代理，也不转发到 TLV 端口，而是直接调用当前进程中的 `CachedSearchService`。
+
+HTTP/1.1 默认启用 keep-alive，同一连接可以连续处理多条请求；客户端发送
+`Connection: close` 时响应后关闭连接。连接建立/断开日志使用 DEBUG 级别，默认
+INFO 环境不再为每个连接写日志。HTTP 工作线程默认 8，并通过
+`http_max_request_size` 限制单条请求大小。
 
 浏览器访问：
 
@@ -1162,12 +1169,12 @@ make
 当前第三期已经完成第一阶段到第十阶段缓存改造，仍保留以下边界：
 
 1. L1 已实现完整 W-TinyLFU 组件；当前 Count-Min Sketch 使用较易理解的固定 4 行设计，尚未采用 Caffeine 更复杂的 hill climbing 自适应窗口调节。
-2. Redis L2 当前使用 hiredis 短连接，没有实现连接池和 pipeline。
+2. Redis L2 已使用持久连接池，尚未实现 pipeline、熔断器和分层命中指标。
 3. Redis 只作为加速层，不保证强一致性，也不作为唯一数据源。
-4. 网页召回严格要求包含所有查询词，没有做降级召回。
-5. 网页搜索使用 TF-IDF 和余弦相似度，没有引入 BM25。
+4. 网页召回已改为忽略 OOV 的 OR 召回；尚未实现可配置的 `minimum_should_match`、topK heap 或 WAND。
+5. 网页搜索已使用 BM25；当前只索引正文，尚未实现标题字段加权的 BM25F。
 6. 动态摘要做轻量 HTML 清理，不实现完整 HTML 解析器。
-7. HTTP 服务只实现浏览器测试需要的能力，不作为通用 Web 框架。
+7. HTTP 服务已支持 keep-alive 和请求大小限制，但仍是课程项目的最小实现，不作为通用 Web 框架。
 
 ## 17. 关键源码入口
 
@@ -1218,4 +1225,4 @@ WebSearcher 负责网页搜索、按需读取网页库和细粒度缓存
 10. 网页库正文按需从文件读取。
 11. Window LRU + Main SLRU + Count-Min Sketch + Doorkeeper + Frequency Aging。
 
-十个缓存改造阶段均已完成。后续工程优化可聚焦 Redis 连接池、真实查询流量压测和基于运行指标的窗口比例调优。
+缓存与连接优化阶段均已完成。后续工程优化可聚焦 Redis 熔断/pipeline、真实查询流量重复压测和基于运行指标的窗口比例调优。

@@ -11,6 +11,7 @@
 
 #include <muduo/net/EventLoop.h>
 #include <muduo/net/InetAddress.h>
+#include <muduo/base/Logging.h>
 
 #include <algorithm>
 #include <cstdint>
@@ -52,6 +53,34 @@ int get_int_or(const Config& config, const std::string& key, int fallback)
         return fallback;
     }
 }
+
+/**
+ * @brief 读取浮点配置项，不存在或格式非法时返回默认值。
+ */
+double get_double_or(const Config& config, const std::string& key, double fallback)
+{
+    try {
+        return std::stod(config.get(key));
+    } catch (const std::exception&) {
+        return fallback;
+    }
+}
+
+void configure_muduo_log_level(const std::string& level)
+{
+    if (level == "TRACE") {
+        muduo::Logger::setLogLevel(muduo::Logger::TRACE);
+    } else if (level == "DEBUG") {
+        muduo::Logger::setLogLevel(muduo::Logger::DEBUG);
+    } else if (level == "INFO") {
+        muduo::Logger::setLogLevel(muduo::Logger::INFO);
+    } else if (level == "ERROR") {
+        muduo::Logger::setLogLevel(muduo::Logger::ERROR);
+    } else {
+        // 线上默认 WARN，避免 muduo TcpServer 为每次建连/断连写 INFO 日志。
+        muduo::Logger::setLogLevel(muduo::Logger::WARN);
+    }
+}
 }
 
 /**
@@ -67,6 +96,7 @@ int main()
         // 统一从项目根目录下的 conf/config.conf 读取路径、端口和线程数。
         // Config 是栈对象，main 结束时自动析构。
         Config config("conf/config.conf");
+        configure_muduo_log_level(get_or(config, "muduo_log_level", "WARN"));
 
         std::cout << "========== SearchEngine V3 Online Server ==========" << std::endl;
 
@@ -78,20 +108,27 @@ int main()
                          config.get("en_dict"),
                          config.get("en_dict_index"));
 
-        // 网页搜索依赖网页库、偏移库、倒排索引和中文停用词。
+        // 网页搜索依赖网页库、偏移库、BM25 倒排索引、文档长度统计和中文停用词。
         // PageLibrary::load 在第三期只加载偏移库并记录 pages.dat 路径，
         // 不再把网页正文全量读入内存。
         WebSearcher searcher;
         searcher.load(config.get("pages"),
                       config.get("offsets"),
                       config.get("invert_index"),
+                      config.get("bm25_doc_stats"),
                       config.get("cn_stop_words"));
+        searcher.set_bm25_parameters(get_double_or(config, "bm25_k1", 1.5),
+                                     get_double_or(config, "bm25_b", 0.75));
 
         std::string ip = get_or(config, "server_ip", "0.0.0.0");
         int port = get_int_or(config, "server_port", 8888);
         int httpPort = get_int_or(config, "http_port", 18888);
         int ioThreads = get_int_or(config, "io_threads", 4);
-        int httpThreads = get_int_or(config, "http_threads", 2);
+        int httpThreads = get_int_or(config, "http_threads", 8);
+        httpThreads = httpThreads > 0 ? httpThreads : 8;
+        int httpMaxRequestSize =
+            get_int_or(config, "http_max_request_size", 1024 * 1024);
+        httpMaxRequestSize = httpMaxRequestSize > 0 ? httpMaxRequestSize : 1024 * 1024;
         int keywordTopK = get_int_or(config, "keyword_topk", 10);
         int webTopK = get_int_or(config, "web_topk", 33);
         int maxMessageSize = get_int_or(config, "max_message_size", 1024 * 1024);
@@ -127,6 +164,10 @@ int main()
         int redisDb = get_int_or(config, "redis_db", 0);
         int redisConnectTimeout = get_int_or(config, "redis_connect_timeout_ms", 20);
         int redisCommandTimeout = get_int_or(config, "redis_command_timeout_ms", 20);
+        int redisPoolSize = get_int_or(config, "redis_pool_size", 16);
+        int redisPoolWaitTimeout = get_int_or(config, "redis_pool_wait_timeout_ms", 20);
+        redisPoolSize = redisPoolSize > 0 ? redisPoolSize : 16;
+        redisPoolWaitTimeout = redisPoolWaitTimeout > 0 ? redisPoolWaitTimeout : 20;
         int redisBackfillTtl = get_int_or(config, "redis_l1_backfill_ttl_seconds", l1CacheTtl);
 
         // unique_ptr 负责缓存对象生命周期。后面传给业务模块的是裸指针 Cache*，
@@ -180,16 +221,19 @@ int main()
         }
 
         if (cacheEnabled != 0 && redisCacheEnabled != 0) {
-            // RedisCache 内部使用 hiredis 短连接。这里构造对象不立即长期持有连接，
-            // 具体 Redis 异常会在 get/put/erase 时降级为缓存未命中或写入失败。
+            // RedisCache 使用惰性持久连接池。构造时不强制连接 Redis，首次访问时
+            // 才建连；Redis 异常会在 get/put/erase 时降级为未命中或写入失败。
             redisCache = std::make_unique<RedisCache>(redisHost,
                                                       redisPort,
                                                       redisDb,
                                                       redisConnectTimeout,
-                                                      redisCommandTimeout);
+                                                      redisCommandTimeout,
+                                                      redisPoolSize,
+                                                      redisPoolWaitTimeout);
             std::cout << "[Cache] Redis L2 enabled, host=" << redisHost
                       << ", port=" << redisPort
                       << ", db=" << redisDb
+                      << ", pool_size=" << redisPoolSize
                       << std::endl;
         }
 
@@ -258,7 +302,8 @@ int main()
                                  wwwRoot,
                                  httpThreads,
                                  keywordTopK,
-                                 webTopK);
+                                 webTopK,
+                                 static_cast<std::size_t>(httpMaxRequestSize));
 
         server.start();
         httpServer.start();

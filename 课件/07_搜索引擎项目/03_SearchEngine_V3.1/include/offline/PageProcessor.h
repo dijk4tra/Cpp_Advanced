@@ -11,10 +11,10 @@
  * @brief 构建网页搜索所需的网页库、偏移库和倒排索引库。
  *
  * 完整流程为：从 XML 的 `<item>` 提取文档，使用 64 位 SimHash 去重并重新
- * 连续编号，生成 pages.dat 和 offsets.dat，最后按课程公式计算归一化 TF-IDF
- * 并生成 invert_index.dat。
+ * 连续编号，生成 pages.dat 和 offsets.dat，最后生成 BM25 所需的原始词频倒排
+ * 索引和文档长度统计。
  *
- * 三个输出文件共享同一组去重后的文档 id。调用 process() 时必须保持阶段顺序，
+ * 四个输出文件共享同一组去重后的文档 id。调用 process() 时必须保持阶段顺序，
  * 不能单独跳过文档提取或去重。该类持有可变中间状态，不是线程安全的。
  */
 class PageProcessor
@@ -35,14 +35,16 @@ public:
      * @param pages 网页库输出路径，内容为连续的 `<doc>` 记录。
      * @param offsets 偏移库输出路径，格式为 `docId offset length`。
      * @param invertIndex 倒排索引输出路径，格式为
-     *        `word docId weight [docId weight]...`。
+     *        `word df docId tf [docId tf]...`。
+     * @param docStats BM25 文档统计输出路径，保存 N、avgdl 和每篇文档的 dl。
      * @throws std::runtime_error 输入目录、停用词或任一输出文件不可用时抛出。
      * @throws utf8::exception 网页分词结果包含非法 UTF-8 序列时可能抛出。
      */
     void process(const std::string& dir,
                  const std::string& pages,
                  const std::string& offsets,
-                 const std::string& invertIndex);
+                 const std::string& invertIndex,
+                 const std::string& docStats);
 
 private:
     /**
@@ -92,12 +94,14 @@ private:
                                  const std::string& offsets);
 
     /**
-     * @brief 对去重文档计算归一化 TF-IDF 并生成倒排索引。
-     * @param filename 倒排索引输出路径。
+     * @brief 统计 BM25 所需的 tf/df/dl/avgdl 并生成倒排索引和文档统计库。
+     * @param indexFile 倒排索引输出路径。
+     * @param statsFile 文档统计输出路径。
      * @throws std::runtime_error 输出文件无法打开时抛出。
      * @throws utf8::exception 分词结果包含非法 UTF-8 序列时可能抛出。
      */
-    void build_inverted_index(const std::string& filename);
+    void build_inverted_index(const std::string& indexFile,
+                              const std::string& statsFile);
 
 private:
     // 中文分词器，供网页关键词统计使用。
@@ -112,6 +116,6 @@ private:
     // 当前一次 process() 中提取并最终去重后的文档集合。
     std::vector<Document> documents_;
 
-    // word -> (docId -> normalized TF-IDF weight)。内层映射即 posting list。
-    std::map<std::string, std::map<int, double>> invertedIndex_;
+    // word -> (docId -> raw term frequency)。BM25 在在线查询时结合 dl/avgdl 计算分数。
+    std::map<std::string, std::map<int, int>> invertedIndex_;
 };

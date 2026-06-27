@@ -35,6 +35,12 @@ def parse_args():
     parser.add_argument("--concurrency", type=int, default=16)
     parser.add_argument("--warmup", type=int, default=100)
     parser.add_argument("--timeout", type=float, default=5.0)
+    parser.add_argument(
+        "--connection-mode",
+        choices=("keep-alive", "close"),
+        default="keep-alive",
+        help="reuse one HTTP connection per worker or reconnect for every request",
+    )
     return parser.parse_args()
 
 
@@ -55,36 +61,51 @@ def percentile(sorted_values, percent):
     return sorted_values[rank]
 
 
-def send_request(host, port, path, query, timeout):
+def send_request(connection, path, query, keep_alive):
     body = json.dumps({"query": query}, ensure_ascii=False).encode("utf-8")
-    connection = http.client.HTTPConnection(host, port, timeout=timeout)
     started = time.perf_counter_ns()
-    try:
-        connection.request(
-            "POST",
-            path,
-            body=body,
-            headers={"Content-Type": "application/json", "Connection": "close"},
-        )
-        response = connection.getresponse()
-        response.read()
-        status = response.status
-    finally:
-        connection.close()
+    connection.request(
+        "POST",
+        path,
+        body=body,
+        headers={
+            "Content-Type": "application/json",
+            "Connection": "keep-alive" if keep_alive else "close",
+        },
+    )
+    response = connection.getresponse()
+    response.read()
+    status = response.status
     elapsed_ms = (time.perf_counter_ns() - started) / 1_000_000.0
     return status, elapsed_ms
 
 
 def warm_up(args, path, queries):
     errors = 0
-    for index in range(max(0, args.warmup)):
-        try:
-            status, _ = send_request(
-                args.host, args.port, path, queries[index % len(queries)], args.timeout
-            )
-            errors += int(status < 200 or status >= 300)
-        except Exception:
-            errors += 1
+    keep_alive = args.connection_mode == "keep-alive"
+    connection = None
+    try:
+        for index in range(max(0, args.warmup)):
+            try:
+                if connection is None:
+                    connection = http.client.HTTPConnection(
+                        args.host, args.port, timeout=args.timeout
+                    )
+                status, _ = send_request(
+                    connection, path, queries[index % len(queries)], keep_alive
+                )
+                errors += int(status < 200 or status >= 300)
+            except Exception:
+                errors += 1
+                if connection is not None:
+                    connection.close()
+                connection = None
+            if not keep_alive and connection is not None:
+                connection.close()
+                connection = None
+    finally:
+        if connection is not None:
+            connection.close()
     if errors:
         raise RuntimeError(f"warmup failed: {errors}/{args.warmup} requests")
 
@@ -101,25 +122,41 @@ def run_load(args, path, queries):
 
     def worker(worker_id):
         nonlocal next_index
+        keep_alive = args.connection_mode == "keep-alive"
+        connection = None
         start_barrier.wait()
-        while True:
-            with index_lock:
-                if next_index >= total_requests:
-                    break
-                request_index = next_index
-                next_index += 1
-            query = queries[request_index % len(queries)]
-            try:
-                status, latency_ms = send_request(
-                    args.host, args.port, path, query, args.timeout
-                )
-                worker_results[worker_id].append(latency_ms)
-                statuses = status_counts[worker_id]
-                statuses[status] = statuses.get(status, 0) + 1
-                if status < 200 or status >= 300:
+        try:
+            while True:
+                with index_lock:
+                    if next_index >= total_requests:
+                        break
+                    request_index = next_index
+                    next_index += 1
+                query = queries[request_index % len(queries)]
+                try:
+                    if connection is None:
+                        connection = http.client.HTTPConnection(
+                            args.host, args.port, timeout=args.timeout
+                        )
+                    status, latency_ms = send_request(
+                        connection, path, query, keep_alive
+                    )
+                    worker_results[worker_id].append(latency_ms)
+                    statuses = status_counts[worker_id]
+                    statuses[status] = statuses.get(status, 0) + 1
+                    if status < 200 or status >= 300:
+                        worker_errors[worker_id] += 1
+                except Exception:
                     worker_errors[worker_id] += 1
-            except Exception:
-                worker_errors[worker_id] += 1
+                    if connection is not None:
+                        connection.close()
+                    connection = None
+                if not keep_alive and connection is not None:
+                    connection.close()
+                    connection = None
+        finally:
+            if connection is not None:
+                connection.close()
 
     threads = [threading.Thread(target=worker, args=(i,)) for i in range(concurrency)]
     for thread in threads:
@@ -145,6 +182,7 @@ def run_load(args, path, queries):
         "errors": errors,
         "elapsed_seconds": elapsed,
         "qps": qps,
+        "connection_mode": args.connection_mode,
         "latency_ms": {
             "mean": statistics.fmean(latencies) if latencies else 0.0,
             "p50": percentile(latencies, 50),

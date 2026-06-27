@@ -66,9 +66,9 @@ void SearchServer::on_connection(const muduo::net::TcpConnectionPtr& conn)
 {
     // TcpConnectionPtr 是 muduo 定义的智能指针，连接对象由 muduo 管理生命周期。
     if (conn->connected()) {
-        LOG_INFO << "client connected: " << conn->peerAddress().toIpPort();
+        LOG_DEBUG << "client connected: " << conn->peerAddress().toIpPort();
     } else {
-        LOG_INFO << "client disconnected: " << conn->peerAddress().toIpPort();
+        LOG_DEBUG << "client disconnected: " << conn->peerAddress().toIpPort();
     }
 }
 

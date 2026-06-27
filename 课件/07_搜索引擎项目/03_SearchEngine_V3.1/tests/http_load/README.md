@@ -2,6 +2,9 @@
 
 `http_load_test.py` 使用 Python 标准库并发请求真实 `search_server`，测量包含网络解析、L1/L2、singleflight 和搜索回源在内的端到端指标。
 
+脚本默认使用 HTTP/1.1 keep-alive：每个并发 worker 持有并复用一条连接。使用
+`--connection-mode close` 可以切回逐请求短连接，量化 TCP 建连和服务端连接管理开销。
+
 ## 前置条件
 
 从项目根目录启动服务：
@@ -24,7 +27,8 @@ python3 http_load_test.py \
   --mode search \
   --requests 5000 \
   --concurrency 32 \
-  --warmup 200
+  --warmup 200 \
+  --connection-mode keep-alive
 ```
 
 关键词推荐：
@@ -41,6 +45,17 @@ python3 http_load_test.py --mode suggest --requests 5000 --concurrency 32
 - 平均延迟、P50、P95、P99 和最大延迟。
 
 任意请求异常或非 2xx 响应都会使脚本返回非 0。
+
+短连接对照：
+
+```bash
+python3 http_load_test.py \
+  --mode search \
+  --requests 5000 \
+  --concurrency 32 \
+  --warmup 200 \
+  --connection-mode close
+```
 
 ## 使用真实查询文件
 
@@ -73,7 +88,8 @@ l1_cache_policy=wtinylfu
 4. 并发度 `1、8、32、64、128`。
 5. 多次重复，报告中位数而不是只取最好结果。
 
-本脚本的每次请求使用短 HTTP 连接，与当前服务 `Connection: close` 行为一致。它适合测量当前项目实际端到端表现，但不能模拟浏览器连接复用。
+结果 JSON 会包含 `connection_mode`，报告中应同时注明 HTTP 工作线程数、Redis
+连接池大小和连接模式，避免把不同网络模型的结果直接比较。
 
 项目当前一次完整实测的方法、原始指标与分析见：
 

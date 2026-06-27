@@ -33,6 +33,7 @@ public:
      * @param httpThreads HTTP 服务的 muduo 工作线程数。
      * @param keywordTopK HTTP 关键字推荐返回数量，来自服务端配置。
      * @param webTopK HTTP 网页搜索返回数量，来自服务端配置。
+     * @param maxRequestSize 单条 HTTP 请求头和 body 的最大总字节数。
      */
     WebHttpServer(muduo::net::EventLoop* loop,
                   const muduo::net::InetAddress& listenAddr,
@@ -40,7 +41,8 @@ public:
                   const std::string& wwwRoot,
                   int httpThreads,
                   int keywordTopK,
-                  int webTopK);
+                  int webTopK,
+                  std::size_t maxRequestSize);
 
     /**
      * @brief 启动 HTTP 服务。
@@ -66,6 +68,9 @@ private:
 
         // 请求体。API 请求中保存 JSON 字符串。
         std::string body;
+
+        // HTTP/1.1 默认复用连接；Connection: close 或 HTTP/1.0 默认关闭。
+        bool keepAlive = false;
     };
 
 private:
@@ -77,8 +82,7 @@ private:
     /**
      * @brief 处理浏览器发来的 HTTP 字节流。
      *
-     * 当前服务采用短连接，成功响应后主动 shutdown，简化 keep-alive 和多请求
-     * 管线化处理。
+     * 支持 HTTP/1.1 keep-alive，并循环处理同一个 Buffer 中已经到达的多条请求。
      */
     void on_message(const muduo::net::TcpConnectionPtr& conn,
                     muduo::net::Buffer* buffer,
@@ -113,12 +117,15 @@ private:
     std::string make_response(int statusCode,
                               const std::string& statusText,
                               const std::string& contentType,
-                              const std::string& body) const;
+                              const std::string& body,
+                              bool keepAlive) const;
 
     /**
      * @brief 组装 JSON 格式的错误响应。
      */
-    std::string make_json_error(int statusCode, const std::string& message) const;
+    std::string make_json_error(int statusCode,
+                                const std::string& message,
+                                bool keepAlive = false) const;
 
     /**
      * @brief 从 wwwRoot_ 中读取静态文件并推断 Content-Type。
@@ -142,4 +149,7 @@ private:
     // HTTP API 返回数量由服务端配置统一控制，浏览器请求不覆盖。
     int keywordTopK_;
     int webTopK_;
+
+    // 防止客户端发送无限增长的请求头或伪造超大 Content-Length。
+    std::size_t maxRequestSize_;
 };

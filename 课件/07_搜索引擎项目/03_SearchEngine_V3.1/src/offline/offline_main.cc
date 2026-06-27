@@ -45,14 +45,15 @@ int main()
                                  config.get("en_dict"),
                                  config.get("en_dict_index"));
 
-        // 2. 构建网页搜索需要的网页库、偏移库和倒排索引库。
-        // 网页建库必须按“提取 -> 去重 -> 网页/偏移库 -> 倒排索引”的顺序执行，
-        // 这样三个输出中的文档 id 都对应同一批去重后的连续编号文档。
+        // 2. 构建网页库、偏移库、BM25 倒排索引和文档长度统计库。
+        // 网页建库必须按“提取 -> 去重 -> 网页/偏移库 -> BM25 索引/统计”的顺序执行，
+        // 这样四个输出中的文档 id 都对应同一批去重后的连续编号文档。
         PageProcessor pageProcessor(config.get("cn_stop_words"));
         pageProcessor.process(config.get("webpage_corpus_dir"),
                               config.get("pages"),
                               config.get("offsets"),
-                              config.get("invert_index"));
+                              config.get("invert_index"),
+                              config.get("bm25_doc_stats"));
 
         std::cout << "========== Build Finished ==========" << std::endl;
         std::cout << "Output directories: data/dict, data/index" << std::endl;

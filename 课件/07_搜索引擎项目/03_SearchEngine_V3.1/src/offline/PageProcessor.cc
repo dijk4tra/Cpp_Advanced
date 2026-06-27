@@ -4,7 +4,6 @@
 #include "../../include/common/TextUtils.h"
 
 #include <algorithm>
-#include <cmath>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
@@ -115,18 +114,20 @@ PageProcessor::PageProcessor(const std::string& stopWordsFile)
 }
 
 /**
- * @brief 按固定依赖顺序生成网页库、偏移库和倒排索引库。
+ * @brief 按固定依赖顺序生成网页库、偏移库、倒排索引和 BM25 文档统计。
  * @param dir 网页 XML 语料目录。
  * @param pages 网页库输出路径。
  * @param offsets 偏移库输出路径。
  * @param invertIndex 倒排索引输出路径。
+ * @param docStats BM25 文档统计输出路径。
  * @throws std::runtime_error 目录无法扫描或任一输出文件无法打开时抛出。
  * @throws utf8::exception 分词结果编码非法时可能抛出。
  */
 void PageProcessor::process(const std::string& dir,
                             const std::string& pages,
                             const std::string& offsets,
-                            const std::string& invertIndex)
+                            const std::string& invertIndex,
+                            const std::string& docStats)
 {
     // 四个阶段具有严格的数据依赖：
     // 1. 从 XML 得到原始 documents_；
@@ -142,8 +143,8 @@ void PageProcessor::process(const std::string& dir,
     std::cout << "[Page] build pages and offsets..." << std::endl;
     build_pages_and_offsets(pages, offsets);
 
-    std::cout << "[Page] build inverted index..." << std::endl;
-    build_inverted_index(invertIndex);
+    std::cout << "[Page] build BM25 inverted index and document stats..." << std::endl;
+    build_inverted_index(invertIndex, docStats);
 }
 
 /**
@@ -315,14 +316,16 @@ void PageProcessor::build_pages_and_offsets(const std::string& pages,
 }
 
 /**
- * @brief 计算归一化 TF-IDF，并写出关键词到文档的倒排索引。
- * @param filename 倒排索引输出路径。
+ * @brief 统计 BM25 所需信息，并写出倒排索引和文档长度统计。
+ * @param indexFile 倒排索引输出路径。
+ * @param statsFile BM25 文档统计输出路径。
  * @throws std::runtime_error 输出文件无法打开时抛出。
  * @throws utf8::exception 分词结果编码非法时可能抛出。
  */
-void PageProcessor::build_inverted_index(const std::string& filename)
+void PageProcessor::build_inverted_index(const std::string& indexFile,
+                                         const std::string& statsFile)
 {
-    // 阶段 1：清除旧索引并准备三类统计量。
+    // 阶段 1：清除旧索引并准备 BM25 需要的原始词频和文档长度。
     // process 未来若重复调用，必须清除旧 posting list，避免混入上次结果。
     invertedIndex_.clear();
 
@@ -331,23 +334,19 @@ void PageProcessor::build_inverted_index(const std::string& filename)
     // 外层 key 是 docId，内层 key 是 word，内层 value 是当前文档中的出现次数。
     std::map<int, std::map<std::string, int>> docTermCount;
 
-    // docTotalWords[docId] = 当前文档有效词总数，用于计算 TF。
+    // docTotalWords[docId] = 当前文档有效 token 数，即 BM25 的 dl。
     std::map<int, int> docTotalWords;
 
-    // documentFrequency[word] = 有多少篇文档包含该词，用于计算 IDF。
-    std::map<std::string, int> documentFrequency;
-
-    // 阶段 2：逐文档分词，同时统计词频、有效词总数和文档频率。
+    // 阶段 2：逐文档分词，同时统计原始 tf 和 dl。
     for (const auto& doc : documents_) {
+        // 即使文档过滤后没有有效 token，也要在统计库中保存 dl=0。
+        docTotalWords[doc.id] = 0;
         std::vector<std::string> words;
         // 与中文词典建库一致，使用 Jieba 默认 Mix 模式切分网页正文。
         tokenizer_.Cut(doc.content, words);
 
-        // DF 统计“包含该词的文档数”，同一词在一篇文档中无论出现多少次，
-        // 都只能贡献 1，因此使用 set 记录本篇出现过的词。
-        std::set<std::string> appearedInThisDoc;
         for (const auto& word : words) {
-            // 停用词、空白、标点和纯数字不进入有效词总数，也不参与 TF-IDF。
+            // 停用词、空白、标点和纯数字不进入 BM25 的 tf/dl 统计。
             if (stopWords_.count(word) != 0) {
                 continue;
             }
@@ -358,80 +357,54 @@ void PageProcessor::build_inverted_index(const std::string& filename)
             // 连续两个 [] 分别访问外层 docId 和内层 word；不存在的映射会被
             // 默认构造，int 初始为 0，随后通过 ++ 累计。
             ++docTermCount[doc.id][word];
-            // TF 的分母是过滤后的有效 token 总数，不是原始分词数组长度。
+            // dl 是过滤后的有效 token 总数，不是原始分词数组长度。
             ++docTotalWords[doc.id];
-            appearedInThisDoc.insert(word);
-        }
-
-        // 遍历 set 而非原 words，保证同一文档对每个词的 DF 只累加一次。
-        for (const auto& word : appearedInThisDoc) {
-            ++documentFrequency[word];
         }
     }
 
-    // 文档总数在 TF-IDF 计算期间保持不变，用 const 表达只读约束。
+    // 阶段 3：把正向 tf 统计反转为 word -> docId -> tf。posting list 的长度
+    // 就是 df，无需重复维护另一份 documentFrequency 映射。
     const int documentCount = static_cast<int>(documents_.size());
-
-    // 阶段 3：对每篇文档计算 TF-IDF，并按文档向量长度归一化。
     for (const auto& [docId, terms] : docTermCount) {
-        // operator[] 读取已存在的 docId 总词数。前面的统计保证 terms 存在时
-        // 对应总词数也存在；防御性检查避免零分母。
-        if (docTotalWords[docId] == 0) {
-            continue;
-        }
-
-        // weights 是当前文档的临时正向权重向量：word -> 未归一化 TF-IDF。
-        std::map<std::string, double> weights;
-        double squareSum = 0.0;
-
         for (const auto& [word, count] : terms) {
-            // PDF 公式：
-            // TF  = 当前词在文档中的次数 / 当前文档有效词总数
-            // IDF = log2(文档总数 / (包含该词的文档数 + 1))
-            // w   = TF * IDF
-            // static_cast<double> 使除法执行浮点运算；若保持 int 会发生整数截断。
-            double tf = static_cast<double>(count) / docTotalWords[docId];
-            double idf = std::log2(static_cast<double>(documentCount) / (documentFrequency[word] + 1));
-            double weight = tf * idf;
-
-            weights[word] = weight;
-            // 同步累计平方和，后续计算文档权重向量的 L2 范数。
-            squareSum += weight * weight;
-        }
-
-        // L2 范数为所有权重平方和的平方根。归一化后文档向量长度为 1，
-        // 便于二期直接使用余弦相似度比较文档和查询向量。
-        double norm = std::sqrt(squareSum);
-        // 当所有词的 IDF 都为 0 时，向量长度为 0，无法执行除法归一化。
-        if (norm == 0.0) {
-            continue;
-        }
-
-        for (const auto& [word, weight] : weights) {
-            // 把正向结构 docId -> word -> weight 反转为
-            // word -> docId -> normalizedWeight，便于二期按查询词快速找文档。
-            invertedIndex_[word][docId] = weight / norm;
+            invertedIndex_[word][docId] = count;
         }
     }
 
-    // 输出格式：word docId weight [docId weight]...
-    // map 保证关键词和 docId 顺序稳定；固定 10 位小数减少序列化精度损失。
-    // 阶段 4：覆盖写出最终倒排索引。
-    std::ofstream ofs(filename);
-    if (!ofs) {
-        throw std::runtime_error("failed to open inverted index file: " + filename);
+    // 阶段 4：输出 word df docId tf [docId tf]...。
+    std::ofstream indexOfs(indexFile);
+    if (!indexOfs) {
+        throw std::runtime_error("failed to open inverted index file: " + indexFile);
     }
-
-    // std::fixed 和 setprecision 是流操纵器：组合后表示小数点后固定保留 10 位，
-    // 设置会持续作用于该输出流后续写入的所有浮点数。
-    ofs << std::fixed << std::setprecision(10);
     for (const auto& [word, postingList] : invertedIndex_) {
-        ofs << word;
-        for (const auto& [docId, weight] : postingList) {
-            ofs << ' ' << docId << ' ' << weight;
+        indexOfs << word << ' ' << postingList.size();
+        for (const auto& [docId, tf] : postingList) {
+            indexOfs << ' ' << docId << ' ' << tf;
         }
-        ofs << '\n';
+        indexOfs << '\n';
     }
 
-    std::cout << "[Page] inverted index keywords: " << invertedIndex_.size() << std::endl;
+    // 阶段 5：输出版本化 BM25 文档统计。avgdl 按全部去重文档计算，包含 dl=0
+    // 的文档，使 N 与网页库/偏移库的文档总数保持一致。
+    std::uint64_t totalDocumentLength = 0;
+    for (const auto& [docId, dl] : docTotalWords) {
+        totalDocumentLength += static_cast<std::uint64_t>(dl);
+    }
+    const double averageDocumentLength = documentCount == 0
+        ? 0.0
+        : static_cast<double>(totalDocumentLength) / documentCount;
+
+    std::ofstream statsOfs(statsFile);
+    if (!statsOfs) {
+        throw std::runtime_error("failed to open BM25 document stats file: " + statsFile);
+    }
+    statsOfs << "BM25_STATS_V1 " << documentCount << ' '
+             << std::fixed << std::setprecision(10) << averageDocumentLength << '\n';
+    for (const auto& [docId, dl] : docTotalWords) {
+        statsOfs << docId << ' ' << dl << '\n';
+    }
+
+    std::cout << "[Page] BM25 inverted index keywords: " << invertedIndex_.size()
+              << ", documents: " << documentCount
+              << ", avgdl: " << averageDocumentLength << std::endl;
 }
