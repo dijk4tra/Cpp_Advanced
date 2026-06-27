@@ -4,6 +4,10 @@ cmake_minimum_required(VERSION 3.16)
 # 项目名称和语言(其中 CXX 表示 C++)
 project(SearchEngineV3 LANGUAGES CXX)
 
+# 启用 CTest。BUILD_TESTING 默认开启，也可以在只构建生产程序时通过
+# -DBUILD_TESTING=OFF 关闭测试目标。
+include(CTest)
+
 # 指定项目使用 C++17 标准
 set(CMAKE_CXX_STANDARD 17)
 # 要求必须使用上面指定的 C++ 标准
@@ -44,6 +48,7 @@ add_executable(search_server
     src/common/Config.cc
     src/common/TextUtils.cc
     src/cache/ShardedLruCache.cc
+    src/cache/ShardedWTinyLfuCache.cc
     src/cache/RedisCache.cc
     src/cache/TwoLevelCache.cc
     src/cache/CachedSearchService.cc
@@ -55,6 +60,20 @@ add_executable(search_server
     src/online/WebSearcher.cc
     src/online/WebHttpServer.cc
 )
+
+# 第九阶段本地缓存策略测试不依赖 muduo、Redis 和离线数据，可独立构建运行。
+if (BUILD_TESTING)
+    add_executable(cache_policy_test
+        tests/cache_policy_test.cc
+        src/cache/ShardedWTinyLfuCache.cc
+    )
+    target_link_libraries(cache_policy_test PRIVATE pthread)
+    # 测试产物保留在构建目录，避免污染源码目录下的 bin/。
+    set_target_properties(cache_policy_test PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests
+    )
+    add_test(NAME cache_policy_test COMMAND cache_policy_test)
+endif()
 
 # 查找 tinyxml2 库
 find_library(TINYXML2_LIB tinyxml2)

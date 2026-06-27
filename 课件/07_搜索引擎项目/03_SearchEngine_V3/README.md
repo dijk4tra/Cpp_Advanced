@@ -4,7 +4,7 @@
 
 1. `offline_builder`：离线建库程序，生成关键词推荐和网页搜索所需的数据文件。
 2. `search_server`：基于 `muduo` 的在线服务，同时提供 TLV 协议端口和浏览器 HTTP 端口。
-3. `cache`：第三期新增缓存层，当前实现 L1 分片 LRU、本机 Redis L2、二级缓存组合、singleflight、空结果缓存、TTL 抖动和缓存统计。
+3. `cache`：第三期新增缓存层，当前实现 L1 分片简化 W-TinyLFU（可回退 LRU）、本机 Redis L2、二级缓存组合、singleflight、空结果缓存、TTL 抖动和缓存统计。
 
 第三期的核心变化：
 
@@ -33,7 +33,7 @@
 缓存链路：
 
 ```text
-请求 -> L1 分片 LRU -> Redis L2 -> singleflight 回源 -> 写入缓存
+请求 -> L1 分片简化 W-TinyLFU -> Redis L2 -> singleflight 回源 -> 写入缓存
 ```
 
 整体数据流：
@@ -60,7 +60,7 @@ flowchart TD
     Browser[浏览器] <-->|HTTP + JSON| ON
 
     ON --> CACHED[CachedSearchService]
-    CACHED --> L1[L1 ShardedLruCache]
+    CACHED --> L1[L1 ShardedWTinyLfuCache]
     L1 --> L2[RedisCache]
     CACHED --> REC[KeywordRecommender]
     CACHED --> SEARCH[WebSearcher]
@@ -98,6 +98,7 @@ flowchart TD
 ├── include/
 │   ├── cache/
 │   │   ├── Cache.h
+│   │   ├── ShardedWTinyLfuCache.h
 │   │   ├── ShardedLruCache.h
 │   │   ├── RedisCache.h
 │   │   ├── TwoLevelCache.h
@@ -119,6 +120,7 @@ flowchart TD
 │       └── DynamicAbstract.h
 ├── src/
 │   ├── cache/
+│   │   ├── ShardedWTinyLfuCache.cc
 │   │   ├── ShardedLruCache.cc
 │   │   ├── RedisCache.cc
 │   │   ├── TwoLevelCache.cc
@@ -129,6 +131,7 @@ flowchart TD
 ├── tests/
 │   ├── Makefile
 │   ├── README.md
+│   ├── cache_policy_test.cc
 │   └── tlv_client.cc
 └── www/
     ├── index.html
@@ -313,6 +316,10 @@ cache_version=search_engine_v3_001
 l1_cache_enabled=1
 l1_cache_capacity=4096
 l1_cache_shards=32
+l1_cache_policy=wtinylfu
+l1_wtinylfu_window_percent=1
+l1_wtinylfu_protected_percent=80
+l1_wtinylfu_frequency_sample_multiplier=10
 l1_cache_ttl_seconds=600
 l1_empty_ttl_seconds=60
 cache_ttl_jitter_seconds=30
@@ -339,6 +346,10 @@ redis_l1_backfill_ttl_seconds=600
 | `l1_cache_enabled` | 是否启用进程内 L1 本地缓存 |
 | `l1_cache_capacity` | L1 缓存总容量，按 key 数量计 |
 | `l1_cache_shards` | L1 分片数量，用于降低多线程锁竞争 |
+| `l1_cache_policy` | L1 淘汰策略：`wtinylfu`（默认）或 `lru`（回退/对照） |
+| `l1_wtinylfu_window_percent` | Window LRU 占分片容量百分比，内部限制到 `[1, 99]` |
+| `l1_wtinylfu_protected_percent` | Main Protected 占 Main 容量上限百分比 |
+| `l1_wtinylfu_frequency_sample_multiplier` | 触发精确频率计数衰减的采样窗口倍数 |
 | `l1_cache_ttl_seconds` | 普通搜索/推荐结果 TTL，`<= 0` 表示不过期 |
 | `l1_empty_ttl_seconds` | 空结果 TTL，用于缓存不存在查询 |
 | `cache_ttl_jitter_seconds` | TTL 随机抖动秒数，减少大量 key 同时过期 |
@@ -511,6 +522,7 @@ classDiagram
         +erase(key)
     }
 
+    class ShardedWTinyLfuCache
     class ShardedLruCache
     class RedisCache
     class TwoLevelCache
@@ -524,7 +536,7 @@ classDiagram
     CachedSearchService --> KeywordRecommender
     CachedSearchService --> WebSearcher
     CachedSearchService --> Cache
-    TwoLevelCache --> ShardedLruCache
+    TwoLevelCache --> ShardedWTinyLfuCache
     TwoLevelCache --> RedisCache
     WebSearcher --> PageLibrary
     WebSearcher --> DynamicAbstract
@@ -565,11 +577,15 @@ classDiagram
 
 缓存只保存可以从离线数据重新计算出来的派生数据，因此 Redis 不可用或缓存丢失不会影响搜索正确性。
 
-### 7.2 L1 分片 LRU
+### 7.2 L1 分片简化 W-TinyLFU
 
 实现文件：
 
 ```text
+include/cache/ShardedWTinyLfuCache.h
+src/cache/ShardedWTinyLfuCache.cc
+
+# 原 LRU 实现作为配置回退和命中率对照保留
 include/cache/ShardedLruCache.h
 src/cache/ShardedLruCache.cc
 ```
@@ -577,11 +593,14 @@ src/cache/ShardedLruCache.cc
 核心结构：
 
 ```text
-ShardedLruCache
+ShardedWTinyLfuCache
   -> vector<Shard>
       -> mutex
-      -> list<Entry>                         最近访问在链表头部
-      -> unordered_map<key, list iterator>   O(1) 定位缓存项
+      -> Window LRU                          接收全部新数据
+      -> Main Probation                      保存通过准入的候选
+      -> Main Protected                      保护重复命中的热点
+      -> unordered_map<key, Location>        O(1) 定位节点及所属分段
+      -> unordered_map<key, frequency>       第九阶段精确频率估计
 ```
 
 访问流程：
@@ -589,10 +608,15 @@ ShardedLruCache
 1. 对 key 做 `std::hash<std::string>`。
 2. 根据哈希值选择分片。
 3. 只锁定该分片。
-4. `get()` 命中后把节点移动到链表头部。
-5. `put()` 新写入链表头部。
-6. 超过分片容量时从链表尾部淘汰。
-7. 过期项在访问和写入时顺带清理。
+4. 每次 `get()`（包括未命中）记录访问频率。
+5. `put()` 的新数据先进入 Window LRU。
+6. Window 淘汰候选在 Main 未满时直接进入 Main Probation。
+7. Main 已满时，候选频率严格高于 Probation 尾部 victim 才允许替换。
+8. Probation 再次命中后晋升 Protected；Protected 超限时将尾部降级回 Probation。
+9. 频率采样达到阈值后所有计数减半，并删除衰减到 0 的冷 key。
+10. 过期项在访问和写入时惰性清理。
+
+这是一版“简化 W-TinyLFU”：窗口、SLRU 和准入策略已经完整落地，但频率估计仍使用精确哈希表。下一阶段将频率估计替换为有界内存的 `Count-Min Sketch + Doorkeeper`，并保留现有分段和准入主体。
 
 TTL 语义：
 
@@ -1111,9 +1135,9 @@ make
 
 ## 16. 当前实现边界
 
-当前第三期已经完成第一阶段到第八阶段缓存改造，仍保留以下边界：
+当前第三期已经完成第一阶段到第九阶段缓存改造，仍保留以下边界：
 
-1. L1 本地缓存当前是分片 LRU，还没有升级为 SLRU 或完整 W-TinyLFU。
+1. L1 已升级为分片简化 W-TinyLFU，但频率估计仍是精确哈希表，尚未实现完整的 Count-Min Sketch 和 Doorkeeper。
 2. Redis L2 当前使用 hiredis 短连接，没有实现连接池和 pipeline。
 3. Redis 只作为加速层，不保证强一致性，也不作为唯一数据源。
 4. 网页召回严格要求包含所有查询词，没有做降级召回。
@@ -1131,6 +1155,7 @@ make
 | 关键词离线建库 | `src/offline/KeywordProcessor.cc` |
 | 网页离线建库 | `src/offline/PageProcessor.cc` |
 | 缓存接口 | `include/cache/Cache.h` |
+| L1 分片简化 W-TinyLFU | `src/cache/ShardedWTinyLfuCache.cc` |
 | L1 分片 LRU | `src/cache/ShardedLruCache.cc` |
 | Redis L2 | `src/cache/RedisCache.cc` |
 | 二级缓存组合 | `src/cache/TwoLevelCache.cc` |
@@ -1156,7 +1181,7 @@ WebSearcher 负责网页搜索、按需读取网页库和细粒度缓存
 
 第三期已落地的核心能力：
 
-1. L1 分片 LRU 本地缓存。
+1. L1 分片简化 W-TinyLFU 本地缓存，并保留分片 LRU 回退策略。
 2. hiredis Redis L2 缓存。
 3. L1 + L2 二级缓存组合。
 4. 关键词推荐和网页搜索最终结果缓存。
@@ -1166,5 +1191,6 @@ WebSearcher 负责网页搜索、按需读取网页库和细粒度缓存
 8. TTL 随机抖动。
 9. 缓存命中率统计日志。
 10. 网页库正文按需从文件读取。
+11. Window LRU + Main SLRU + 频率准入与周期衰减。
 
-下一步可以继续推进第九阶段：把 L1 淘汰策略从当前分片 LRU 升级为 SLRU 或简化 W-TinyLFU。
+下一步是完整 W-TinyLFU：实现 Count-Min Sketch、Doorkeeper，并增加可重复的 LRU/W-TinyLFU 命中率基准测试。

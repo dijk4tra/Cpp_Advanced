@@ -2,6 +2,7 @@
 #include "../../include/cache/CachedSearchService.h"
 #include "../../include/cache/RedisCache.h"
 #include "../../include/cache/ShardedLruCache.h"
+#include "../../include/cache/ShardedWTinyLfuCache.h"
 #include "../../include/cache/TwoLevelCache.h"
 #include "../../include/online/KeywordRecommender.h"
 #include "../../include/online/SearchServer.h"
@@ -11,6 +12,7 @@
 #include <muduo/net/EventLoop.h>
 #include <muduo/net/InetAddress.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <exception>
 #include <iostream>
@@ -107,6 +109,11 @@ int main()
         int l1CacheEnabled = get_int_or(config, "l1_cache_enabled", 1);
         int l1CacheCapacity = get_int_or(config, "l1_cache_capacity", 4096);
         int l1CacheShards = get_int_or(config, "l1_cache_shards", 32);
+        std::string l1CachePolicy = get_or(config, "l1_cache_policy", "wtinylfu");
+        int l1WindowPercent = get_int_or(config, "l1_wtinylfu_window_percent", 1);
+        int l1ProtectedPercent = get_int_or(config, "l1_wtinylfu_protected_percent", 80);
+        int l1FrequencySampleMultiplier =
+            get_int_or(config, "l1_wtinylfu_frequency_sample_multiplier", 10);
         int l1CacheTtl = get_int_or(config, "l1_cache_ttl_seconds", 600);
         int l1EmptyTtl = get_int_or(config, "l1_empty_ttl_seconds", 60);
         int documentCacheTtl = get_int_or(config, "document_cache_ttl_seconds", 600);
@@ -124,7 +131,7 @@ int main()
 
         // unique_ptr 负责缓存对象生命周期。后面传给业务模块的是裸指针 Cache*，
         // 但实际对象一直由这些 unique_ptr 持有，直到 main 退出。
-        std::unique_ptr<ShardedLruCache> l1Cache;
+        std::unique_ptr<Cache> l1Cache;
         std::unique_ptr<RedisCache> redisCache;
         std::unique_ptr<TwoLevelCache> twoLevelCache;
         // cache 始终指向“最终对外使用的缓存”：可能是 L1、Redis、TwoLevelCache，
@@ -134,17 +141,40 @@ int main()
             // 容量和分片数不能为 0。配置非法时回退默认值，避免后续取模或淘汰逻辑异常。
             l1CacheCapacity = l1CacheCapacity > 0 ? l1CacheCapacity : 4096;
             l1CacheShards = l1CacheShards > 0 ? l1CacheShards : 32;
-            // make_unique 创建对象并返回 unique_ptr，异常时不会泄漏内存。
-            l1Cache = std::make_unique<ShardedLruCache>(
-                static_cast<std::size_t>(l1CacheCapacity),
-                static_cast<std::size_t>(l1CacheShards));
+            // 默认使用第九阶段的简化 W-TinyLFU。保留 lru 选项便于回归测试、
+            // 对比命中率，并在新策略出现异常时快速回退。
+            if (l1CachePolicy == "lru") {
+                l1Cache = std::make_unique<ShardedLruCache>(
+                    static_cast<std::size_t>(l1CacheCapacity),
+                    static_cast<std::size_t>(l1CacheShards));
+            } else {
+                l1CachePolicy = "wtinylfu";
+                // 入口先完成范围校验，使启动日志中的值与缓存实际采用的值一致。
+                l1WindowPercent = std::clamp(l1WindowPercent, 1, 99);
+                l1ProtectedPercent = std::clamp(l1ProtectedPercent, 1, 99);
+                l1FrequencySampleMultiplier =
+                    l1FrequencySampleMultiplier > 0 ? l1FrequencySampleMultiplier : 10;
+                l1Cache = std::make_unique<ShardedWTinyLfuCache>(
+                    static_cast<std::size_t>(l1CacheCapacity),
+                    static_cast<std::size_t>(l1CacheShards),
+                    static_cast<std::size_t>(l1WindowPercent),
+                    static_cast<std::size_t>(l1ProtectedPercent),
+                    static_cast<std::size_t>(l1FrequencySampleMultiplier));
+            }
             // 如果后面没有 Redis 或 TwoLevelCache，这个指针就是最终缓存。
             cache = l1Cache.get();
-            std::cout << "[Cache] L1 enabled, capacity=" << l1Cache->capacity()
-                      << ", shards=" << l1Cache->shard_count()
+            std::cout << "[Cache] L1 enabled, policy=" << l1CachePolicy
+                      << ", capacity=" << l1CacheCapacity
+                      << ", shards=" << l1CacheShards
                       << ", ttl=" << l1CacheTtl
-                      << ", empty_ttl=" << l1EmptyTtl
-                      << std::endl;
+                      << ", empty_ttl=" << l1EmptyTtl;
+            if (l1CachePolicy == "wtinylfu") {
+                std::cout << ", window_percent=" << l1WindowPercent
+                          << ", protected_percent=" << l1ProtectedPercent
+                          << ", frequency_sample_multiplier="
+                          << l1FrequencySampleMultiplier;
+            }
+            std::cout << std::endl;
         } else {
             std::cout << "[Cache] L1 disabled" << std::endl;
         }

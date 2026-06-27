@@ -25,7 +25,7 @@ TLV 协议格式：
 先从项目根目录启动在线服务：
 
 ```bash
-cd 课件/07_搜索引擎项目/02_SearchEngine_V2
+cd 课件/07_搜索引擎项目/03_SearchEngine_V3
 ./bin/search_server
 ```
 
@@ -36,14 +36,14 @@ cd 课件/07_搜索引擎项目/02_SearchEngine_V2
 方式一：使用 `make`。
 
 ```bash
-cd 课件/07_搜索引擎项目/02_SearchEngine_V2/tests
+cd 课件/07_搜索引擎项目/03_SearchEngine_V3/tests
 make
 ```
 
 方式二：直接使用 `g++`。
 
 ```bash
-cd 课件/07_搜索引擎项目/02_SearchEngine_V2
+cd 课件/07_搜索引擎项目/03_SearchEngine_V3
 g++ -std=c++17 -Wall -Wextra -O2 tests/tlv_client.cc -o tests/tlv_client
 ```
 
@@ -168,3 +168,24 @@ decoded json value:
 TLV 外层是二进制协议，不适合直接用 `nc` 手写，因为前 5 个字节包含二进制 type 和网络序 length。可以用 `xxd` 查看字节，但构造和解析都不直观。
 
 因此推荐使用本目录的 `tlv_client`：它本质上也是 Linux 命令行程序，但会把发送和接收的原始 TLV 字节完整打印出来，更适合调试协议。
+
+## 9. 简化 W-TinyLFU 策略测试
+
+`cache_policy_test.cc` 不依赖 muduo、Redis 或离线数据，可以单独验证 L1 缓存：
+
+```bash
+cd 课件/07_搜索引擎项目/03_SearchEngine_V3
+cmake -S . -B build
+cmake --build build --target cache_policy_test
+ctest --test-dir build --output-on-failure -R cache_policy_test
+```
+
+也可以进入 `tests/` 后执行 `make cache_policy_test && ./cache_policy_test`。
+
+正常输出：
+
+```text
+cache_policy_test: PASS
+```
+
+当前覆盖扫描流量下的热点保护、TTL、显式删除以及多线程并发读写。它验证的是数据结构行为，不代替真实查询流量下的 LRU/W-TinyLFU 命中率基准测试。
