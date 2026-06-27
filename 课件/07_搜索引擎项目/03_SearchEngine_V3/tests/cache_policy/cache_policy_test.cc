@@ -1,4 +1,5 @@
-#include "../include/cache/ShardedWTinyLfuCache.h"
+#include "../../include/cache/ShardedWTinyLfuCache.h"
+#include "../../include/cache/TinyLfuFrequencySketch.h"
 
 #include <cassert>
 #include <chrono>
@@ -9,6 +10,33 @@
 
 namespace
 {
+void test_frequency_sketch()
+{
+    const std::uint64_t hash = 0x123456789abcdef0ULL;
+    TinyLfuFrequencySketch sketch(32, 1000);
+    const std::size_t memoryBytes = sketch.memory_usage_bytes();
+
+    assert(sketch.estimate(hash) == 0);
+    sketch.increment(hash);
+    // 第一次访问只进入 Doorkeeper，不写 Count-Min Sketch。
+    assert(sketch.estimate(hash) == 1);
+    sketch.increment(hash);
+    assert(sketch.estimate(hash) == 2);
+
+    // 4-bit counter 最大为 15，再加 Doorkeeper 的 1，估算值最大为 16。
+    for (int i = 0; i < 100; ++i) {
+        sketch.increment(hash);
+    }
+    assert(sketch.estimate(hash) == 16);
+    assert(sketch.memory_usage_bytes() == memoryBytes);
+
+    TinyLfuFrequencySketch agingSketch(8, 4);
+    for (std::uint64_t i = 0; i < 4; ++i) {
+        agingSketch.increment(i * 17 + 1);
+    }
+    assert(agingSketch.reset_count() == 1);
+}
+
 void test_scan_resistance()
 {
     // 单分片和较大的 Window 比例让测试的分段容量固定且容易推导：
@@ -81,13 +109,29 @@ void test_concurrent_access()
     const auto stats = cache.stats();
     assert(stats.hits + stats.misses > 0);
 }
+
+void test_frequency_aging_stats()
+{
+    ShardedWTinyLfuCache cache(8, 1, 25, 80, 2);
+    std::string value;
+    const std::size_t sketchBytes = cache.frequency_sketch_bytes();
+    assert(sketchBytes > 0);
+
+    for (int i = 0; i < 32; ++i) {
+        cache.get("aging-" + std::to_string(i), value);
+    }
+    assert(cache.stats().frequencyAges >= 2);
+    assert(cache.frequency_sketch_bytes() == sketchBytes);
+}
 }
 
 int main()
 {
+    test_frequency_sketch();
     test_scan_resistance();
     test_ttl_and_erase();
     test_concurrent_access();
+    test_frequency_aging_stats();
     std::cout << "cache_policy_test: PASS" << std::endl;
     return 0;
 }

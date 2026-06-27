@@ -1,2 +1,7 @@
-/tlv_client
-/cache_policy_test
+/tlv_client/tlv_client
+/cache_policy/cache_policy_test
+/cache_policy/cache_policy_benchmark
+/http_load/__pycache__/
+
+# 仓库根 .gitignore 全局忽略 Makefile；测试子目录的独立 Makefile 需要纳入版本控制。
+!/*/Makefile

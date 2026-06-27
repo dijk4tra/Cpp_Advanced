@@ -48,6 +48,7 @@ add_executable(search_server
     src/common/Config.cc
     src/common/TextUtils.cc
     src/cache/ShardedLruCache.cc
+    src/cache/TinyLfuFrequencySketch.cc
     src/cache/ShardedWTinyLfuCache.cc
     src/cache/RedisCache.cc
     src/cache/TwoLevelCache.cc
@@ -61,18 +62,31 @@ add_executable(search_server
     src/online/WebHttpServer.cc
 )
 
-# 第九阶段本地缓存策略测试不依赖 muduo、Redis 和离线数据，可独立构建运行。
+# W-TinyLFU 组件测试和策略基准不依赖 muduo、Redis 和离线数据，可独立运行。
 if (BUILD_TESTING)
     add_executable(cache_policy_test
-        tests/cache_policy_test.cc
+        tests/cache_policy/cache_policy_test.cc
+        src/cache/TinyLfuFrequencySketch.cc
         src/cache/ShardedWTinyLfuCache.cc
     )
     target_link_libraries(cache_policy_test PRIVATE pthread)
     # 测试产物保留在构建目录，避免污染源码目录下的 bin/。
     set_target_properties(cache_policy_test PROPERTIES
-        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests/cache_policy
     )
     add_test(NAME cache_policy_test COMMAND cache_policy_test)
+
+    add_executable(cache_policy_benchmark
+        tests/cache_policy/cache_policy_benchmark.cc
+        src/cache/ShardedLruCache.cc
+        src/cache/TinyLfuFrequencySketch.cc
+        src/cache/ShardedWTinyLfuCache.cc
+    )
+    target_link_libraries(cache_policy_benchmark PRIVATE pthread)
+    set_target_properties(cache_policy_benchmark PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests/cache_policy
+    )
+    add_test(NAME cache_policy_benchmark COMMAND cache_policy_benchmark)
 endif()
 
 # 查找 tinyxml2 库

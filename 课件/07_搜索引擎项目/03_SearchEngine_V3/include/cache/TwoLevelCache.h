@@ -23,7 +23,7 @@ public:
     void erase(const std::string& key) override;
 
 private:
-    // L1 通常是进程内 ShardedLruCache，访问速度最快。
+    // L1 当前通常是进程内 ShardedWTinyLfuCache，也可配置回退到 ShardedLruCache。
     Cache* l1_;
 
     // L2 通常是 RedisCache，用于跨进程共享或服务重启后保留一部分热数据。

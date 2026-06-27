@@ -141,7 +141,7 @@ int main()
             // 容量和分片数不能为 0。配置非法时回退默认值，避免后续取模或淘汰逻辑异常。
             l1CacheCapacity = l1CacheCapacity > 0 ? l1CacheCapacity : 4096;
             l1CacheShards = l1CacheShards > 0 ? l1CacheShards : 32;
-            // 默认使用第九阶段的简化 W-TinyLFU。保留 lru 选项便于回归测试、
+            // 默认使用第十阶段的完整 W-TinyLFU。保留 lru 选项便于回归测试、
             // 对比命中率，并在新策略出现异常时快速回退。
             if (l1CachePolicy == "lru") {
                 l1Cache = std::make_unique<ShardedLruCache>(
