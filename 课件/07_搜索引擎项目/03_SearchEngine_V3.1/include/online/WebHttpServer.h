@@ -34,6 +34,7 @@ public:
      * @param keywordTopK HTTP 关键字推荐返回数量，来自服务端配置。
      * @param webTopK HTTP 网页搜索返回数量，来自服务端配置。
      * @param maxRequestSize 单条 HTTP 请求头和 body 的最大总字节数。
+     * @param slowRequestMs 超过该毫秒数的请求记录 WARN。
      */
     WebHttpServer(muduo::net::EventLoop* loop,
                   const muduo::net::InetAddress& listenAddr,
@@ -42,7 +43,8 @@ public:
                   int httpThreads,
                   int keywordTopK,
                   int webTopK,
-                  std::size_t maxRequestSize);
+                  std::size_t maxRequestSize,
+                  int slowRequestMs);
 
     /**
      * @brief 启动 HTTP 服务。
@@ -152,4 +154,5 @@ private:
 
     // 防止客户端发送无限增长的请求头或伪造超大 Content-Length。
     std::size_t maxRequestSize_;
+    int slowRequestMs_;
 };

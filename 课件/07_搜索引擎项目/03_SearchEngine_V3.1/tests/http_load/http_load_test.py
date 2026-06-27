@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""SearchEngine V3 HTTP end-to-end load test using only the Python standard library."""
+"""SearchEngine V3.1 HTTP end-to-end load test using only the Python standard library."""
 
 import argparse
 import http.client
@@ -31,6 +31,21 @@ def parse_args():
     parser.add_argument("--port", type=int, default=18888)
     parser.add_argument("--mode", choices=("search", "suggest"), default="search")
     parser.add_argument("--query-file", type=Path)
+    parser.add_argument(
+        "--query",
+        help="repeat one explicit query; useful for cold-key singleflight tests",
+    )
+    parser.add_argument(
+        "--workload",
+        choices=("stable", "scan"),
+        default="stable",
+        help="use the normal query list or generate the 6200-request scan workload",
+    )
+    parser.add_argument(
+        "--scan-namespace",
+        default="v31_scan",
+        help="prefix generated scan keys so repeated cold-cache runs do not overlap",
+    )
     parser.add_argument("--requests", type=int, default=1000)
     parser.add_argument("--concurrency", type=int, default=16)
     parser.add_argument("--warmup", type=int, default=100)
@@ -51,6 +66,22 @@ def load_queries(path):
     queries = [query for query in queries if query and not query.startswith("#")]
     if not queries:
         raise ValueError("query file contains no usable queries")
+    return queries
+
+
+def build_scan_queries(namespace):
+    """Build the same 6200-request scan shape used by the original V3 report."""
+    # 20 hot keys are first repeated ten times so they enter the cache/frequency sketch.
+    hot_queries = [f"{namespace}_hot_{index}" for index in range(20)]
+    queries = hot_queries * 10
+
+    # Each round inserts 200 never-reused scan keys, then revisits every hot key five
+    # times. The resulting 4020-key workload has a theoretical maximum 35.16% hit rate.
+    for round_index in range(20):
+        queries.extend(
+            f"{namespace}_round_{round_index}_scan_{index}" for index in range(200)
+        )
+        queries.extend(hot_queries * 5)
     return queries
 
 
@@ -196,7 +227,18 @@ def run_load(args, path, queries):
 
 def main():
     args = parse_args()
-    queries = load_queries(args.query_file)
+    if args.workload == "scan":
+        if args.query_file is not None or args.query is not None:
+            raise ValueError("--query/--query-file cannot be combined with --workload scan")
+        queries = build_scan_queries(args.scan_namespace)
+        # One pass is the complete workload. Reject accidental truncation/repetition so
+        # different benchmark runs retain exactly the same request distribution.
+        if args.requests != len(queries):
+            raise ValueError("scan workload requires --requests 6200")
+    else:
+        if args.query is not None and args.query_file is not None:
+            raise ValueError("--query and --query-file are mutually exclusive")
+        queries = [args.query] if args.query is not None else load_queries(args.query_file)
     path = "/api/search" if args.mode == "search" else "/api/suggest"
 
     warm_up(args, path, queries)

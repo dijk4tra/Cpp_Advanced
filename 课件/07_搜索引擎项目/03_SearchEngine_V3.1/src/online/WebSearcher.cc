@@ -3,10 +3,12 @@
 #include "../../include/common/TextUtils.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <fstream>
 #include <nlohmann/json.hpp>
 #include <sstream>
+#include <spdlog/spdlog.h>
 #include <stdexcept>
 #include <utility>
 
@@ -81,6 +83,11 @@ void WebSearcher::load(const std::string& pages,
     load_inverted_index(invertIndex);
 }
 
+/**
+ * @brief 设置 BM25 词频饱和参数和文档长度归一化参数。
+ *
+ * k1 必须为正数，b 应在 [0, 1] 内；非法配置回退到常用默认值。
+ */
 void WebSearcher::set_bm25_parameters(double k1, double b)
 {
     bm25K1_ = k1 > 0.0 ? k1 : 1.5;
@@ -119,6 +126,7 @@ void WebSearcher::set_detail_cache(Cache* cache,
  */
 std::string WebSearcher::search_json(const std::string& query, int topK) const
 {
+    const auto requestStarted = std::chrono::steady_clock::now();
     topK = topK <= 0 ? 33 : topK;
 
     nlohmann::json response;
@@ -127,8 +135,10 @@ std::string WebSearcher::search_json(const std::string& query, int topK) const
     response["query"] = query;
     response["results"] = nlohmann::json::array();
 
-    // 第一步：分词并统计查询词频，得到查询 TF 的基础数据。
+    // 第一步：分词并统计出现次数。map 在这里主要完成查询词去重，
+    // 当前 BM25 实现对每个不同查询词计分一次，不使用查询侧 TF。
     std::map<std::string, int> termCount = cut_query(query);
+    const auto tokenizedAt = std::chrono::steady_clock::now();
     if (termCount.empty()) {
         // 查询被分词和过滤后没有有效词，返回空结果。
         return response.dump();
@@ -143,6 +153,7 @@ std::string WebSearcher::search_json(const std::string& query, int topK) const
 
     // 第三步：取所有有效查询词 posting list 的并集，得到 OR 召回候选集合。
     std::set<int> candidateDocs = find_candidate_docs(queryTerms);
+    const auto recalledAt = std::chrono::steady_clock::now();
     if (candidateDocs.empty()) {
         return response.dump();
     }
@@ -175,6 +186,7 @@ std::string WebSearcher::search_json(const std::string& query, int topK) const
         }
         return lhs.docId < rhs.docId;
     });
+    const auto rankedAt = std::chrono::steady_clock::now();
 
     // topK 可能大于实际结果数，取二者较小值避免数组越界。
     int count = std::min(topK, static_cast<int>(results.size()));
@@ -194,6 +206,20 @@ std::string WebSearcher::search_json(const std::string& query, int topK) const
             {"score", results[i].score}
         });
     }
+
+    const auto finishedAt = std::chrono::steady_clock::now();
+    // C++14 泛型 lambda 用 auto 接收同一时钟的 time_point，统一输出微秒。
+    // 保留各阶段检查点，可区分分词、召回、排序和文档/摘要回源开销。
+    const auto micros = [](auto end, auto begin) {
+        return std::chrono::duration_cast<std::chrono::microseconds>(end - begin).count();
+    };
+    spdlog::debug(
+        "web search stages query_bytes={} terms={} candidates={} results={} "
+        "tokenize_us={} recall_us={} rank_us={} render_us={} total_us={}",
+        query.size(), queryTerms.size(), candidateDocs.size(), response["results"].size(),
+        micros(tokenizedAt, requestStarted), micros(recalledAt, tokenizedAt),
+        micros(rankedAt, recalledAt), micros(finishedAt, rankedAt),
+        micros(finishedAt, requestStarted));
 
     return response.dump();
 }
@@ -241,6 +267,11 @@ void WebSearcher::load_inverted_index(const std::string& filename)
     }
 }
 
+/**
+ * @brief 加载 BM25 文档数、平均文档长度和每篇文档的长度。
+ *
+ * 首行魔数用来拒绝旧版或损坏文件；后续每行是 docId-documentLength。
+ */
 void WebSearcher::load_document_stats(const std::string& filename)
 {
     std::ifstream ifs(filename);
@@ -249,6 +280,7 @@ void WebSearcher::load_document_stats(const std::string& filename)
     }
 
     std::string magic;
+    // operator>> 可连续解析空白分隔字段；整个表达式失败时流会转为 false。
     if (!(ifs >> magic >> documentCount_ >> averageDocumentLength_)
         || magic != "BM25_STATS_V1"
         || documentCount_ <= 0
@@ -337,6 +369,10 @@ std::set<int> WebSearcher::find_candidate_docs(
     return candidates;
 }
 
+/**
+ * @brief 计算单个查询词对指定文档的 BM25 分数贡献。
+ * @return 词未登录、文档未命中该词或统计缺失时返回 0。
+ */
 double WebSearcher::bm25_term_score(const std::string& term, int docId) const
 {
     auto termIt = invertedIndex_.find(term);
@@ -352,6 +388,8 @@ double WebSearcher::bm25_term_score(const std::string& term, int docId) const
         return 0.0;
     }
 
+    // tf：词在当前文档的出现次数；df：包含该词的文档数；
+    // n：文档总数；dl：当前文档的有效词数。转 double 避免后续整数除法。
     const double tf = static_cast<double>(postingIt->second);
     const double df = static_cast<double>(termIt->second.size());
     const double n = static_cast<double>(documentCount_);
@@ -359,12 +397,14 @@ double WebSearcher::bm25_term_score(const std::string& term, int docId) const
 
     // Robertson/Sparck Jones IDF 的正值平滑形式，避免高 DF 词产生负分。
     const double idf = std::log(1.0 + (n - df + 0.5) / (df + 0.5));
+    // b=0 时不做长度归一化；b 越大，长文档的词频惩罚越明显。
     const double lengthNormalization =
         1.0 - bm25B_ + bm25B_ * dl / averageDocumentLength_;
     const double denominator = tf + bm25K1_ * lengthNormalization;
     return idf * tf * (bm25K1_ + 1.0) / denominator;
 }
 
+/** @brief 优先从缓存读取文档，未命中时回源网页库并回填缓存。 */
 bool WebSearcher::get_document(int docId, Document& doc) const
 {
     if (detailCache_ != nullptr) {
@@ -393,6 +433,7 @@ bool WebSearcher::get_document(int docId, Document& doc) const
     return true;
 }
 
+/** @brief 优先读取查询相关摘要缓存，未命中时生成并回填。 */
 std::string WebSearcher::get_abstract(const Document& doc,
                                       const std::vector<std::string>& keywords) const
 {
@@ -416,6 +457,7 @@ std::string WebSearcher::get_abstract(const Document& doc,
     return abstract;
 }
 
+/** @brief 构造包含数据版本的文档缓存 key。 */
 std::string WebSearcher::build_document_cache_key(int docId) const
 {
     std::ostringstream oss;
@@ -424,6 +466,7 @@ std::string WebSearcher::build_document_cache_key(int docId) const
     return oss.str();
 }
 
+/** @brief 构造同时区分文档、查询词和摘要长度的缓存 key。 */
 std::string WebSearcher::build_abstract_cache_key(int docId,
                                                   const std::vector<std::string>& keywords) const
 {

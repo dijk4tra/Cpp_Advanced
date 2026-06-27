@@ -78,7 +78,7 @@ flowchart TD
 ## 2. 目录结构
 
 ```text
-03_SearchEngine_V3/
+03_SearchEngine_V3.1/
 ├── CMakeLists.txt
 ├── README.md
 ├── bin/
@@ -95,6 +95,7 @@ flowchart TD
 │   ├── 项目第三期开发思路.md
 │   ├── 项目第三期缓存技术详解.md
 │   ├── 项目第三期HTTP压测报告.md
+│   ├── 项目第三期HTTP压测报告-V3.1.md
 │   ├── 项目第三期缓存改造流程.md
 │   └── 项目第三期开发进度.md
 ├── include/
@@ -185,6 +186,7 @@ cppjieba
 utfcpp
 simhash
 nlohmann/json
+spdlog
 ```
 
 依赖用途：
@@ -198,6 +200,7 @@ nlohmann/json
 | `utfcpp` | UTF-8 字符拆分和码点判断 |
 | `simhash` | 离线网页近似去重 |
 | `nlohmann/json` | 请求、响应和文档缓存 JSON 序列化 |
+| `spdlog` | 异步控制台日志、滚动文件日志和统一格式化 |
 
 ### 3.2 编译
 
@@ -321,6 +324,12 @@ io_threads=4
 http_threads=8
 http_max_request_size=1048576
 muduo_log_level=WARN
+log_level=info
+log_dir=logs
+log_max_file_size_mb=20
+log_max_files=5
+log_async_queue_size=8192
+slow_request_ms=200
 max_message_size=1048576
 keyword_topk=10
 web_topk=33
@@ -386,6 +395,23 @@ redis_l1_backfill_ttl_seconds=600
 | `redis_pool_size` | Redis 持久连接池最大连接数 |
 | `redis_pool_wait_timeout_ms` | 连接池耗尽时等待空闲连接的最长时间，超时后降级 |
 | `redis_l1_backfill_ttl_seconds` | Redis 命中后回填 L1 的 TTL |
+
+### 4.3 日志配置
+
+| 配置 | 说明 |
+| --- | --- |
+| `log_level` | spdlog 级别，默认 `info`；逐请求和搜索阶段详情使用 `debug` |
+| `log_dir` | 日志目录，生成 `offline_builder.log` 和 `search_server.log` |
+| `log_max_file_size_mb` | 单个文件达到该大小后滚动 |
+| `log_max_files` | 每个 logger 最多保留的滚动文件数 |
+| `log_async_queue_size` | 异步队列容量，队列满时阻塞而不是丢失错误日志 |
+| `slow_request_ms` | HTTP/TLV 业务处理超过该时长时记录 WARN |
+| `muduo_log_level` | muduo 框架日志级别，默认 WARN 避免逐连接 INFO |
+
+离线日志在 INFO 级别记录词典、字符索引、网页提取、去重、网页库和 BM25
+索引等阶段的开始、结束、耗时与统计。在线普通逐请求日志和搜索分阶段耗时放在
+DEBUG；默认 INFO 只保留启动配置、周期缓存统计；慢请求和可恢复异常使用 WARN，
+启动失败使用 CRITICAL。请求日志只记录 query/body 字节数，不主动记录原始查询词。
 
 `Config` 解析规则：
 
@@ -590,6 +616,16 @@ classDiagram
 3. L1 缓存按 key 哈希分片，每个分片有独立互斥锁。
 4. Redis L2 使用有上限的持久连接池，每条 hiredis 连接同一时刻只由一个线程独占使用。
 5. `CachedSearchService` 使用 singleflight 合并相同 key 的并发回源。
+
+### 6.3 统一日志
+
+`AppLogger` 在离线和在线进程中创建同一套日志结构：一个彩色控制台 sink、一个
+按大小滚动的文件 sink、一个后台线程和有界异步队列。muduo WARN 及以上输出也
+桥接到 spdlog，避免长期维护两套日志出口。
+
+在线搜索 DEBUG 日志包含 `tokenize_us`、`recall_us`、`rank_us`、`render_us` 和
+`total_us`；HTTP/TLV 日志包含协议、客户端、请求大小和总处理耗时。Redis 故障
+只记录首次及每累计 100 次 WARN，避免故障期间刷屏。
 
 ## 7. 缓存设计与实现
 

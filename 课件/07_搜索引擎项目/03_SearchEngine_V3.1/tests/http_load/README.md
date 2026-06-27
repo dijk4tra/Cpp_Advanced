@@ -69,6 +69,38 @@ python3 http_load_test.py \
   --warmup 500
 ```
 
+## 扫描流量
+
+`scan` 工作负载与 V3 HTTP 压测报告保持相同形状：20 个热点先预热 200 次，
+然后交替插入 4000 个仅访问一次的 query 和 2000 次热点访问，共 6200 次。
+
+```bash
+python3 http_load_test.py \
+  --mode search \
+  --workload scan \
+  --scan-namespace v31_scan_round_1 \
+  --requests 6200 \
+  --concurrency 32 \
+  --warmup 0 \
+  --connection-mode keep-alive
+```
+
+`scan-namespace` 会进入查询和缓存 key。测试冷缓存/冷 Redis 路径时，每轮应使用
+不同 namespace，避免上轮结果被复用。
+
+### singleflight 冷 key
+
+`--query` 可让全部并发请求复用同一个 query，方便检查冷 key 是否只回源一次：
+
+```bash
+python3 http_load_test.py \
+  --mode search \
+  --query v31_singleflight_cold_key \
+  --requests 300 \
+  --concurrency 32 \
+  --warmup 0
+```
+
 ## 对比 LRU 与 W-TinyLFU
 
 建议使用完全相同的查询文件、请求数、并发度和机器环境，分别执行：

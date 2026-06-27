@@ -1,17 +1,18 @@
 #include "../../include/online/WebHttpServer.h"
 
-#include <muduo/base/Logging.h>
 #include <muduo/net/Buffer.h>
 #include <muduo/net/EventLoop.h>
 #include <muduo/net/TcpConnection.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cctype>
 #include <filesystem>
 #include <fstream>
 #include <functional>
 #include <nlohmann/json.hpp>
 #include <sstream>
+#include <spdlog/spdlog.h>
 #include <stdexcept>
 
 // 允许 std::bind 中直接使用 _1、_2、_3 作为回调参数占位符。
@@ -123,7 +124,8 @@ WebHttpServer::WebHttpServer(muduo::net::EventLoop* loop,
                              int httpThreads,
                              int keywordTopK,
                              int webTopK,
-                             std::size_t maxRequestSize)
+                             std::size_t maxRequestSize,
+                             int slowRequestMs)
     // server_ 构造时就绑定 EventLoop、监听地址和服务名。
     : server_(loop, listenAddr, "WebHttpServer")
     // service_ 是引用成员，必须在初始化列表中绑定到外部对象。
@@ -132,6 +134,7 @@ WebHttpServer::WebHttpServer(muduo::net::EventLoop* loop,
     , keywordTopK_(keywordTopK)
     , webTopK_(webTopK)
     , maxRequestSize_(maxRequestSize > 0 ? maxRequestSize : 1024 * 1024)
+    , slowRequestMs_(slowRequestMs > 0 ? slowRequestMs : 200)
 {
     // 与 TLV 服务一样，HTTP 服务也基于 muduo TcpServer；区别只是上层协议解析。
     // 成员函数作为回调时，需要通过 std::bind 绑定 this 指针。
@@ -157,9 +160,9 @@ void WebHttpServer::on_connection(const muduo::net::TcpConnectionPtr& conn)
 {
     // 逐连接日志在高并发短连接压测中开销明显，降为 DEBUG 后默认 INFO 级别不输出。
     if (conn->connected()) {
-        LOG_DEBUG << "http client connected: " << conn->peerAddress().toIpPort();
+        spdlog::debug("HTTP client connected peer={}", conn->peerAddress().toIpPort());
     } else {
-        LOG_DEBUG << "http client disconnected: " << conn->peerAddress().toIpPort();
+        spdlog::debug("HTTP client disconnected peer={}", conn->peerAddress().toIpPort());
     }
 }
 
@@ -171,6 +174,7 @@ void WebHttpServer::on_message(const muduo::net::TcpConnectionPtr& conn,
                                muduo::Timestamp)
 {
     try {
+        // 同一 TCP Buffer 可能含有多个管线化请求；按到达顺序逐个解析和应答。
         while (true) {
             HttpRequest request;
             if (!try_parse_request(buffer, request)) {
@@ -178,7 +182,25 @@ void WebHttpServer::on_message(const muduo::net::TcpConnectionPtr& conn,
                 return;
             }
 
+            // 从完整请求已解析开始计时，包含业务处理和响应入发送缓冲区，
+            // 不包含请求等待收齐以及客户端从 socket 读完数据的时间。
+            const auto started = std::chrono::steady_clock::now();
             conn->send(handle_request(request));
+            const auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - started).count();
+            // 仅慢请求记 WARN，普通请求记 DEBUG，控制生产环境的日志写入量。
+            if (elapsedMs >= slowRequestMs_) {
+                spdlog::warn(
+                    "slow HTTP request peer={} method={} path={} body_bytes={} elapsed_ms={}",
+                    conn->peerAddress().toIpPort(), request.method, request.path,
+                    request.body.size(), elapsedMs);
+            } else {
+                spdlog::debug(
+                    "HTTP request completed peer={} method={} path={} body_bytes={} "
+                    "keep_alive={} elapsed_ms={}",
+                    conn->peerAddress().toIpPort(), request.method, request.path,
+                    request.body.size(), request.keepAlive, elapsedMs);
+            }
             if (!request.keepAlive) {
                 conn->shutdown();
                 return;
@@ -190,6 +212,8 @@ void WebHttpServer::on_message(const muduo::net::TcpConnectionPtr& conn,
         // JSON 解析失败、路径非法、Content-Length 非法等异常统一返回 400。
         conn->send(make_json_error(400, ex.what()));
         conn->shutdown();
+        spdlog::warn("HTTP request failed peer={} buffered_bytes={} error={}",
+                     conn->peerAddress().toIpPort(), buffer->readableBytes(), ex.what());
     }
 }
 

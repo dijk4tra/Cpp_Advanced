@@ -2,8 +2,10 @@
 
 #include "Cache.h"
 
+#include <atomic>
 #include <condition_variable>
 #include <cstddef>
+#include <cstdint>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -55,6 +57,9 @@ private:
     /** @brief 归还健康连接；异常连接会被关闭并从池容量中移除。 */
     void release(struct redisContext* context, bool healthy);
 
+    /** @brief 首次以及每累计 100 次故障记录一条 WARN，避免 Redis 故障刷屏。 */
+    void log_failure(const char* reason);
+
     /**
      * @brief 按配置切换 Redis DB。
      *
@@ -82,4 +87,5 @@ private:
     std::condition_variable poolCondition_;
     std::vector<struct redisContext*> idleConnections_;
     std::size_t totalConnections_ = 0;
+    std::atomic<std::uint64_t> failureCount_{0};
 };

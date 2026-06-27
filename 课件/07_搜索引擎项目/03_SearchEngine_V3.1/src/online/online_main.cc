@@ -1,4 +1,5 @@
 #include "../../include/common/Config.h"
+#include "../../include/common/Logger.h"
 #include "../../include/cache/CachedSearchService.h"
 #include "../../include/cache/RedisCache.h"
 #include "../../include/cache/ShardedLruCache.h"
@@ -16,8 +17,8 @@
 #include <algorithm>
 #include <cstdint>
 #include <exception>
-#include <iostream>
 #include <memory>
+#include <spdlog/spdlog.h>
 #include <string>
 
 namespace
@@ -66,6 +67,12 @@ double get_double_or(const Config& config, const std::string& key, double fallba
     }
 }
 
+/**
+ * @brief 将配置文本映射为 muduo 日志级别。
+ *
+ * muduo 和 spdlog 拥有独立的级别系统；先在 muduo 侧过滤低级别日志，
+ * 可避免高并发时构造大量逐连接 INFO 文本。
+ */
 void configure_muduo_log_level(const std::string& level)
 {
     if (level == "TRACE") {
@@ -80,6 +87,26 @@ void configure_muduo_log_level(const std::string& level)
         // 线上默认 WARN，避免 muduo TcpServer 为每次建连/断连写 INFO 日志。
         muduo::Logger::setLogLevel(muduo::Logger::WARN);
     }
+}
+
+/**
+ * @brief 将 muduo 通过 OutputFunc 交付的日志统一写入 spdlog。
+ */
+void muduo_log_output(const char* message, int length)
+{
+    // 按显式长度构造 string，不要假设 message 以 '\0' 结尾。
+    std::string text(message, static_cast<std::size_t>(length));
+    // muduo 文本本身已带换行，spdlog pattern 也会换行，因此先去掉行尾。
+    while (!text.empty() && (text.back() == '\n' || text.back() == '\r')) {
+        text.pop_back();
+    }
+    spdlog::warn("muduo message={}", text);
+}
+
+/** @brief 将 muduo 的刷新回调转发给 spdlog 默认 logger。 */
+void muduo_log_flush()
+{
+    spdlog::default_logger()->flush();
 }
 }
 
@@ -96,9 +123,25 @@ int main()
         // 统一从项目根目录下的 conf/config.conf 读取路径、端口和线程数。
         // Config 是栈对象，main 结束时自动析构。
         Config config("conf/config.conf");
+        // 日志必须在其他业务对象初始化前完成，启动失败才能留下上下文。
+        AppLogger::Options logOptions;
+        logOptions.loggerName = "search_server";
+        logOptions.filePath = get_or(config, "log_dir", "logs") + "/search_server.log";
+        logOptions.level = get_or(config, "log_level", "info");
+        // 先用 max 防止负数配置，再转 size_t；若先转无符号类型会变成巨大值。
+        logOptions.maxFileSizeBytes = static_cast<std::size_t>(
+            std::max(1, get_int_or(config, "log_max_file_size_mb", 20))) * 1024U * 1024U;
+        logOptions.maxFiles = static_cast<std::size_t>(
+            std::max(1, get_int_or(config, "log_max_files", 5)));
+        logOptions.asyncQueueSize = static_cast<std::size_t>(
+            std::max(128, get_int_or(config, "log_async_queue_size", 8192)));
+        AppLogger::init(logOptions);
+        // muduo 先设级别再替换输出回调：达到阈值的库日志才会进入 spdlog。
         configure_muduo_log_level(get_or(config, "muduo_log_level", "WARN"));
+        muduo::Logger::setOutput(muduo_log_output);
+        muduo::Logger::setFlush(muduo_log_flush);
 
-        std::cout << "========== SearchEngine V3 Online Server ==========" << std::endl;
+        spdlog::info("online service initialization started");
 
         // 关键字推荐依赖一期离线生成的中英文词典和字符索引。
         KeywordRecommender recommender;
@@ -129,6 +172,8 @@ int main()
         int httpMaxRequestSize =
             get_int_or(config, "http_max_request_size", 1024 * 1024);
         httpMaxRequestSize = httpMaxRequestSize > 0 ? httpMaxRequestSize : 1024 * 1024;
+        int slowRequestMs = get_int_or(config, "slow_request_ms", 200);
+        slowRequestMs = slowRequestMs > 0 ? slowRequestMs : 200;
         int keywordTopK = get_int_or(config, "keyword_topk", 10);
         int webTopK = get_int_or(config, "web_topk", 33);
         int maxMessageSize = get_int_or(config, "max_message_size", 1024 * 1024);
@@ -204,20 +249,19 @@ int main()
             }
             // 如果后面没有 Redis 或 TwoLevelCache，这个指针就是最终缓存。
             cache = l1Cache.get();
-            std::cout << "[Cache] L1 enabled, policy=" << l1CachePolicy
-                      << ", capacity=" << l1CacheCapacity
-                      << ", shards=" << l1CacheShards
-                      << ", ttl=" << l1CacheTtl
-                      << ", empty_ttl=" << l1EmptyTtl;
             if (l1CachePolicy == "wtinylfu") {
-                std::cout << ", window_percent=" << l1WindowPercent
-                          << ", protected_percent=" << l1ProtectedPercent
-                          << ", frequency_sample_multiplier="
-                          << l1FrequencySampleMultiplier;
+                spdlog::info(
+                    "L1 cache enabled policy={} capacity={} shards={} ttl={} empty_ttl={} "
+                    "window_percent={} protected_percent={} frequency_sample_multiplier={}",
+                    l1CachePolicy, l1CacheCapacity, l1CacheShards, l1CacheTtl, l1EmptyTtl,
+                    l1WindowPercent, l1ProtectedPercent, l1FrequencySampleMultiplier);
+            } else {
+                spdlog::info("L1 cache enabled policy={} capacity={} shards={} ttl={} empty_ttl={}",
+                             l1CachePolicy, l1CacheCapacity, l1CacheShards,
+                             l1CacheTtl, l1EmptyTtl);
             }
-            std::cout << std::endl;
         } else {
-            std::cout << "[Cache] L1 disabled" << std::endl;
+            spdlog::info("L1 cache disabled");
         }
 
         if (cacheEnabled != 0 && redisCacheEnabled != 0) {
@@ -230,11 +274,8 @@ int main()
                                                       redisCommandTimeout,
                                                       redisPoolSize,
                                                       redisPoolWaitTimeout);
-            std::cout << "[Cache] Redis L2 enabled, host=" << redisHost
-                      << ", port=" << redisPort
-                      << ", db=" << redisDb
-                      << ", pool_size=" << redisPoolSize
-                      << std::endl;
+            spdlog::info("Redis L2 enabled host={} port={} db={} pool_size={} wait_timeout_ms={}",
+                         redisHost, redisPort, redisDb, redisPoolSize, redisPoolWaitTimeout);
         }
 
         if (cacheEnabled != 0) {
@@ -252,10 +293,10 @@ int main()
                 // 只启用 L1 时直接使用本地缓存。
                 cache = l1Cache.get();
             } else {
-                std::cout << "[Cache] disabled" << std::endl;
+                spdlog::info("cache disabled");
             }
         } else {
-            std::cout << "[Cache] disabled" << std::endl;
+            spdlog::info("cache disabled");
         }
 
         // 细粒度缓存由 WebSearcher 内部使用：
@@ -293,7 +334,8 @@ int main()
                             // maxMessageSize 配置读出是 int，ProtocolCodec 需要 uint32_t。
                             static_cast<uint32_t>(maxMessageSize),
                             keywordTopK,
-                            webTopK);
+                            webTopK,
+                            slowRequestMs);
 
         muduo::net::InetAddress httpListenAddr(ip, static_cast<uint16_t>(httpPort));
         WebHttpServer httpServer(&loop,
@@ -303,18 +345,24 @@ int main()
                                  httpThreads,
                                  keywordTopK,
                                  webTopK,
-                                 static_cast<std::size_t>(httpMaxRequestSize));
+                                 static_cast<std::size_t>(httpMaxRequestSize),
+                                 slowRequestMs);
 
         server.start();
         httpServer.start();
-        std::cout << "[Online] TLV listen on " << ip << ":" << port << std::endl;
-        std::cout << "[Online] Web listen on http://" << ip << ":" << httpPort << std::endl;
+        spdlog::info("TLV server listening address={}:{} threads={}", ip, port, ioThreads);
+        spdlog::info("HTTP server listening address={}:{} threads={} keep_alive=true",
+                     ip, httpPort, httpThreads);
         // loop() 进入 muduo 事件循环，之后由回调函数处理连接和请求。
         loop.loop();
+        // server/httpServer 等局部对象会在 return 期间析构，先只 flush，不提前销毁
+        // spdlog 线程池，避免 muduo 析构日志进入已经 shutdown 的 logger。
+        spdlog::default_logger()->flush();
         return 0;
     } catch (const std::exception& ex) {
         // 启动阶段任何异常都在这里统一打印，返回非 0 表示程序启动失败。
-        std::cerr << "[Error] " << ex.what() << std::endl;
+        spdlog::critical("online service failed error={}", ex.what());
+        AppLogger::shutdown();
         return 1;
     }
 }

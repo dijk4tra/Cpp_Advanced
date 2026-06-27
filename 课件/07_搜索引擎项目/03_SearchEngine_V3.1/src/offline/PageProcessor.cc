@@ -1,16 +1,18 @@
 #include "../../include/offline/PageProcessor.h"
 
 #include "../../include/common/DirectoryScanner.h"
+#include "../../include/common/Logger.h"
 #include "../../include/common/TextUtils.h"
 
 #include <algorithm>
+#include <chrono>
 #include <fstream>
 #include <iomanip>
-#include <iostream>
 #include <map>
 #include <set>
 #include <sstream>
 #include <stdexcept>
+#include <spdlog/spdlog.h>
 #include <tinyxml2.h>
 
 namespace
@@ -134,17 +136,36 @@ void PageProcessor::process(const std::string& dir,
     // 2. 原地替换为去重文档并重新编号；
     // 3. 使用最终编号生成网页库和偏移库；
     // 4. 使用同一批文档生成倒排索引。
-    std::cout << "[Page] extract documents..." << std::endl;
+    // steady_clock 不受系统时钟回拨影响，用它记录离线各阶段的真实耗时。
+    // 同一个 time_point 变量在阶段切换时重置，使日志可直接定位慢阶段。
+    auto started = std::chrono::steady_clock::now();
+    spdlog::info("offline stage started stage=extract_documents");
     extract_documents(dir);
+    spdlog::info("offline stage finished stage=extract_documents elapsed_ms={}",
+                 std::chrono::duration_cast<std::chrono::milliseconds>(
+                     std::chrono::steady_clock::now() - started).count());
 
-    std::cout << "[Page] deduplicate documents..." << std::endl;
+    // duration_cast<milliseconds> 显式统一日志单位，count() 返回整数毫秒数。
+    started = std::chrono::steady_clock::now();
+    spdlog::info("offline stage started stage=deduplicate_documents");
     deduplicate_documents();
+    spdlog::info("offline stage finished stage=deduplicate_documents elapsed_ms={}",
+                 std::chrono::duration_cast<std::chrono::milliseconds>(
+                     std::chrono::steady_clock::now() - started).count());
 
-    std::cout << "[Page] build pages and offsets..." << std::endl;
+    started = std::chrono::steady_clock::now();
+    spdlog::info("offline stage started stage=pages_and_offsets");
     build_pages_and_offsets(pages, offsets);
+    spdlog::info("offline stage finished stage=pages_and_offsets elapsed_ms={}",
+                 std::chrono::duration_cast<std::chrono::milliseconds>(
+                     std::chrono::steady_clock::now() - started).count());
 
-    std::cout << "[Page] build BM25 inverted index and document stats..." << std::endl;
+    started = std::chrono::steady_clock::now();
+    spdlog::info("offline stage started stage=bm25_index");
     build_inverted_index(invertIndex, docStats);
+    spdlog::info("offline stage finished stage=bm25_index elapsed_ms={}",
+                 std::chrono::duration_cast<std::chrono::milliseconds>(
+                     std::chrono::steady_clock::now() - started).count());
 }
 
 /**
@@ -173,7 +194,8 @@ void PageProcessor::extract_documents(const std::string& dir)
         if (err != tinyxml2::XML_SUCCESS) {
             // 单个 XML 损坏时跳过该文件并继续处理其他语料；日志保留文件路径，
             // 便于离线任务结束后定位并修复原始数据。
-            std::cerr << "[Page] skip invalid XML: " << file << std::endl;
+            spdlog::warn("invalid XML skipped file={} tinyxml_error={}", file,
+                         static_cast<int>(err));
             continue;
         }
 
@@ -207,9 +229,8 @@ void PageProcessor::extract_documents(const std::string& dir)
         }
     }
 
-    std::cout << "[Page] XML files: " << files.size()
-              << ", raw items: " << rawItems
-              << ", valid documents: " << documents_.size() << std::endl;
+    spdlog::info("documents extracted xml_files={} raw_items={} valid_documents={}",
+                 files.size(), rawItems, documents_.size());
 }
 
 /**
@@ -264,7 +285,7 @@ void PageProcessor::deduplicate_documents()
         documents_[i].id = i + 1;
     }
 
-    std::cout << "[Page] unique documents: " << documents_.size() << std::endl;
+    spdlog::info("documents deduplicated unique_documents={}", documents_.size());
 }
 
 /**
@@ -404,7 +425,6 @@ void PageProcessor::build_inverted_index(const std::string& indexFile,
         statsOfs << docId << ' ' << dl << '\n';
     }
 
-    std::cout << "[Page] BM25 inverted index keywords: " << invertedIndex_.size()
-              << ", documents: " << documentCount
-              << ", avgdl: " << averageDocumentLength << std::endl;
+    spdlog::info("BM25 index built terms={} documents={} avgdl={:.3f}",
+                 invertedIndex_.size(), documentCount, averageDocumentLength);
 }

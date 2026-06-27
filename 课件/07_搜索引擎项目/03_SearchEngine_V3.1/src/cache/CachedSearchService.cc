@@ -1,11 +1,10 @@
 #include "../../include/cache/CachedSearchService.h"
 
 #include <cctype>
-#include <iomanip>
-#include <iostream>
 #include <nlohmann/json.hpp>
 #include <random>
 #include <sstream>
+#include <spdlog/spdlog.h>
 #include <utility>
 
 namespace
@@ -368,16 +367,11 @@ void CachedSearchService::log_stats_if_needed() const
     // static_cast<double> 避免整数除法。seen 为 0 时命中率定义为 0。
     double hitRate = seen == 0 ? 0.0 : static_cast<double>(hits) * 100.0 / seen;
 
-    std::cout << std::fixed << std::setprecision(2)
-              << "[Cache] total=" << seen
-              << " hit_rate=" << hitRate << "%"
-              << " suggest_hit=" << suggestHits
-              << " suggest_miss=" << suggestMisses
-              << " search_hit=" << searchHits
-              << " search_miss=" << searchMisses
-              << " backend_compute=" << backendComputes_.load()
-              << " cache_put=" << cachePuts_.load()
-              << " empty_put=" << emptyCachePuts_.load()
-              << " singleflight_wait=" << singleflightWaits_.load()
-              << std::endl;
+    spdlog::info(
+        "cache stats total={} hit_rate={:.2f}% suggest_hit={} suggest_miss={} "
+        "search_hit={} search_miss={} backend_compute={} cache_put={} empty_put={} "
+        "singleflight_wait={}",
+        seen, hitRate, suggestHits, suggestMisses, searchHits, searchMisses,
+        backendComputes_.load(), cachePuts_.load(), emptyCachePuts_.load(),
+        singleflightWaits_.load());
 }

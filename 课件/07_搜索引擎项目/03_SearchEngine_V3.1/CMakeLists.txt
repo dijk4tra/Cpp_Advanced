@@ -8,6 +8,8 @@ project(SearchEngineV3 LANGUAGES CXX)
 # -DBUILD_TESTING=OFF 关闭测试目标。
 include(CTest)
 
+find_package(spdlog REQUIRED)
+
 # 指定项目使用 C++17 标准
 set(CMAKE_CXX_STANDARD 17)
 # 要求必须使用上面指定的 C++ 标准
@@ -38,6 +40,7 @@ add_executable(offline_builder
     src/common/Config.cc
     src/common/DirectoryScanner.cc
     src/common/TextUtils.cc
+    src/common/Logger.cc
     src/offline/KeywordProcessor.cc
     src/offline/PageProcessor.cc
 )
@@ -47,6 +50,7 @@ add_executable(search_server
     src/online/online_main.cc
     src/common/Config.cc
     src/common/TextUtils.cc
+    src/common/Logger.cc
     src/cache/ShardedLruCache.cc
     src/cache/TinyLfuFrequencySketch.cc
     src/cache/ShardedWTinyLfuCache.cc
@@ -93,6 +97,7 @@ if (BUILD_TESTING)
     add_executable(web_searcher_recall_test
         tests/web_searcher_recall_test.cc
         src/common/TextUtils.cc
+        src/common/Logger.cc
         src/online/PageLibrary.cc
         src/online/DynamicAbstract.cc
         src/online/WebSearcher.cc
@@ -100,11 +105,15 @@ if (BUILD_TESTING)
     target_compile_definitions(web_searcher_recall_test PRIVATE
         SEARCH_ENGINE_TEST_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
     )
+    target_link_libraries(web_searcher_recall_test PRIVATE spdlog::spdlog)
     set_target_properties(web_searcher_recall_test PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests/online
     )
     add_test(NAME web_searcher_recall_test COMMAND web_searcher_recall_test)
 endif()
+
+target_link_libraries(offline_builder PRIVATE spdlog::spdlog)
+target_link_libraries(search_server PRIVATE spdlog::spdlog)
 
 # 查找 tinyxml2 库
 find_library(TINYXML2_LIB tinyxml2)

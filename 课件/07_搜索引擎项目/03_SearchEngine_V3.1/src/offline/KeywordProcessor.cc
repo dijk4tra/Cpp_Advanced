@@ -1,14 +1,16 @@
 #include "../../include/offline/KeywordProcessor.h"
 
 #include "../../include/common/DirectoryScanner.h"
+#include "../../include/common/Logger.h"
 #include "../../include/common/TextUtils.h"
 
+#include <chrono>
 #include <fstream>
-#include <iostream>
 #include <map>
 #include <set>
 #include <sstream>
 #include <stdexcept>
+#include <spdlog/spdlog.h>
 
 /**
  * @brief 构造关键字推荐离线处理器。
@@ -47,17 +49,36 @@ void KeywordProcessor::process(const std::string& cnDir,
 {
     // 索引中保存的是词典文件的行号，因此每种语言都必须先生成词典，
     // 再读取该词典构建对应索引，不能颠倒顺序。
-    std::cout << "[Keyword] build English dictionary..." << std::endl;
+    // steady_clock 只保证单调递增，不受系统时间校准影响，适合计算阶段耗时。
+    // started 在每个阶段开始前重新赋值，避免将前一阶段的时间累加进来。
+    auto started = std::chrono::steady_clock::now();
+    spdlog::info("offline stage started stage=english_dictionary");
     create_en_dict(enDir, enDict);
+    spdlog::info("offline stage finished stage=english_dictionary elapsed_ms={}",
+                 std::chrono::duration_cast<std::chrono::milliseconds>(
+                     std::chrono::steady_clock::now() - started).count());
 
-    std::cout << "[Keyword] build English index..." << std::endl;
+    // duration_cast 把 steady_clock 的原始 duration 转换为毫秒，count() 取整数值。
+    started = std::chrono::steady_clock::now();
+    spdlog::info("offline stage started stage=english_character_index");
     build_en_index(enDict, enIndex);
+    spdlog::info("offline stage finished stage=english_character_index elapsed_ms={}",
+                 std::chrono::duration_cast<std::chrono::milliseconds>(
+                     std::chrono::steady_clock::now() - started).count());
 
-    std::cout << "[Keyword] build Chinese dictionary..." << std::endl;
+    started = std::chrono::steady_clock::now();
+    spdlog::info("offline stage started stage=chinese_dictionary");
     create_cn_dict(cnDir, cnDict);
+    spdlog::info("offline stage finished stage=chinese_dictionary elapsed_ms={}",
+                 std::chrono::duration_cast<std::chrono::milliseconds>(
+                     std::chrono::steady_clock::now() - started).count());
 
-    std::cout << "[Keyword] build Chinese index..." << std::endl;
+    started = std::chrono::steady_clock::now();
+    spdlog::info("offline stage started stage=chinese_character_index");
     build_cn_index(cnDict, cnIndex);
+    spdlog::info("offline stage finished stage=chinese_character_index elapsed_ms={}",
+                 std::chrono::duration_cast<std::chrono::milliseconds>(
+                     std::chrono::steady_clock::now() - started).count());
 }
 
 /**
@@ -118,8 +139,8 @@ void KeywordProcessor::create_en_dict(const std::string& dir, const std::string&
         ofs << word << ' ' << frequency << '\n';
     }
 
-    std::cout << "[Keyword] English files: " << files.size()
-              << ", dict size: " << wordFrequency.size() << std::endl;
+    spdlog::info("english dictionary built files={} words={}",
+                 files.size(), wordFrequency.size());
 }
 
 /**
@@ -176,7 +197,7 @@ void KeywordProcessor::build_en_index(const std::string& dict, const std::string
         ofs << '\n';
     }
 
-    std::cout << "[Keyword] English index keys: " << charIndex.size() << std::endl;
+    spdlog::info("english character index built keys={}", charIndex.size());
 }
 
 /**
@@ -237,8 +258,8 @@ void KeywordProcessor::create_cn_dict(const std::string& dir, const std::string&
         ofs << word << ' ' << frequency << '\n';
     }
 
-    std::cout << "[Keyword] Chinese files: " << files.size()
-              << ", dict size: " << wordFrequency.size() << std::endl;
+    spdlog::info("chinese dictionary built files={} words={}",
+                 files.size(), wordFrequency.size());
 }
 
 /**
@@ -301,5 +322,5 @@ void KeywordProcessor::build_cn_index(const std::string& dict, const std::string
         ofs << '\n';
     }
 
-    std::cout << "[Keyword] Chinese index keys: " << charIndex.size() << std::endl;
+    spdlog::info("chinese character index built keys={}", charIndex.size());
 }

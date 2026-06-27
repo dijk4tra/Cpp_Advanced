@@ -2,11 +2,12 @@
 
 #include "../../include/online/ProtocolCodec.h"
 
-#include <muduo/base/Logging.h>
 #include <muduo/net/EventLoop.h>
 
+#include <chrono>
 #include <functional>
 #include <nlohmann/json.hpp>
+#include <spdlog/spdlog.h>
 
 // 让 std::bind 中可以直接使用 _1、_2、_3。
 // 这些占位符表示 muduo 调用回调时传进来的第 1、第 2、第 3 个实参。
@@ -31,7 +32,8 @@ SearchServer::SearchServer(muduo::net::EventLoop* loop,
                            int ioThreads,
                            uint32_t maxMessageSize,
                            int keywordTopK,
-                           int webTopK)
+                           int webTopK,
+                           int slowRequestMs)
     // 成员初始化列表会在进入构造函数函数体之前初始化成员。
     // server_ 没有默认构造后再设置监听地址的过程，因此必须在这里直接构造。
     : server_(loop, listenAddr, "SearchServer")
@@ -40,6 +42,7 @@ SearchServer::SearchServer(muduo::net::EventLoop* loop,
     , maxMessageSize_(maxMessageSize)
     , keywordTopK_(keywordTopK)
     , webTopK_(webTopK)
+    , slowRequestMs_(slowRequestMs > 0 ? slowRequestMs : 200)
 {
     // std::bind 把成员函数绑定到当前对象。_1/_2/_3 是占位符，由 muduo 在回调
     // 发生时传入实际连接、缓冲区和时间戳。
@@ -66,9 +69,9 @@ void SearchServer::on_connection(const muduo::net::TcpConnectionPtr& conn)
 {
     // TcpConnectionPtr 是 muduo 定义的智能指针，连接对象由 muduo 管理生命周期。
     if (conn->connected()) {
-        LOG_DEBUG << "client connected: " << conn->peerAddress().toIpPort();
+        spdlog::debug("TLV client connected peer={}", conn->peerAddress().toIpPort());
     } else {
-        LOG_DEBUG << "client disconnected: " << conn->peerAddress().toIpPort();
+        spdlog::debug("TLV client disconnected peer={}", conn->peerAddress().toIpPort());
     }
 }
 
@@ -86,15 +89,35 @@ void SearchServer::on_message(const muduo::net::TcpConnectionPtr& conn,
         Request request;
         // while 循环用于处理粘包：一次 on_message 可能已经收到了多条完整 TLV。
         while (ProtocolCodec::try_decode(buffer, request, maxMessageSize_)) {
+            // 计时范围覆盖 JSON 解析、检索/推荐和响应编码，不包括客户端接收时间。
+            // steady_clock 单调递增，适合请求耗时统计。
+            const auto started = std::chrono::steady_clock::now();
             // 默认响应类型与请求类型相同；如果业务层发现错误，会通过引用参数改成 100。
             uint8_t responseType = request.type;
             std::string response = handle_request(request.type, request.value, responseType);
             // 业务层只返回 JSON 字符串，发送前仍需重新封装成 TLV。
             conn->send(ProtocolCodec::encode(responseType, response));
+            const auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - started).count();
+            // 慢请求保留 WARN 便于默认级别下排查；正常请求降为 DEBUG，
+            // 避免高并发时同步格式化和写日志成为新瓶颈。
+            if (elapsedMs >= slowRequestMs_) {
+                spdlog::warn(
+                    "slow TLV request peer={} type={} request_bytes={} elapsed_ms={}",
+                    conn->peerAddress().toIpPort(), static_cast<int>(request.type),
+                    request.value.size(), elapsedMs);
+            } else {
+                spdlog::debug(
+                    "TLV request completed peer={} type={} request_bytes={} elapsed_ms={}",
+                    conn->peerAddress().toIpPort(), static_cast<int>(request.type),
+                    request.value.size(), elapsedMs);
+            }
         }
     } catch (const std::exception& ex) {
         // 协议错误、JSON 解析错误或业务处理异常统一封装为 type=100 的错误响应。
         conn->send(ProtocolCodec::encode(kErrorResponse, make_error(ex.what())));
+        spdlog::warn("TLV request failed peer={} buffered_bytes={} error={}",
+                     conn->peerAddress().toIpPort(), buffer->readableBytes(), ex.what());
     }
 }
 

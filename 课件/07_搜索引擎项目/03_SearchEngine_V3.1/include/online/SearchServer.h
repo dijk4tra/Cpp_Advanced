@@ -30,6 +30,7 @@ public:
      * @param maxMessageSize TLV value 最大字节数。
      * @param keywordTopK 关键字推荐默认返回数量，请求 JSON 可用 topk 覆盖。
      * @param webTopK 网页搜索默认返回数量，请求 JSON 可用 topk 覆盖。
+     * @param slowRequestMs 超过该毫秒数的请求记录 WARN。
      */
     SearchServer(muduo::net::EventLoop* loop,
                  const muduo::net::InetAddress& listenAddr,
@@ -37,7 +38,8 @@ public:
                  int ioThreads,
                  uint32_t maxMessageSize,
                  int keywordTopK,
-                 int webTopK);
+                 int webTopK,
+                 int slowRequestMs);
 
     /**
      * @brief 启动 TcpServer。
@@ -87,4 +89,5 @@ private:
     // 默认返回数量；TLV 请求 JSON 中提供 topk 时可以覆盖。
     int keywordTopK_;
     int webTopK_;
+    int slowRequestMs_;
 };
