@@ -430,28 +430,84 @@ function safeAbstract(value) {
 
 推荐图：`docs/ppt_materials/08_bug_and_to_or.mmd`
 
-### Bug 2：HTTP/Redis 短连接与逐连接日志成为端到端瓶颈
+### Bug 2：中文编辑距离按字节计算，推荐结果排序异常
 
 | 项目 | 内容 |
 | --- | --- |
-| 现象 | 客户端并发提高后延迟明显上升，QPS 收益不明显；日志大量输出连接建立/断开 |
-| 根因 | HTTP 每请求断开 TCP；Redis 每命令建连并 SELECT；muduo 逐连接 INFO |
-| 修复 | HTTP/1.1 keep-alive；Redis 惰性持久连接池；连接日志降为 DEBUG；线程数可配置 |
-| 验证 | keep-alive 让搜索 QPS +45.22%、推荐 +87.36%；36243 条 Redis 命令只新建 8 条连接 |
+| 现象 | 中文查询的编辑距离明显偏大；两个只相差一个汉字的词，可能被判断为相差多个字符，推荐排序不符合直觉 |
+| 根因 | UTF-8 是变长编码，一个常用汉字通常占 3 个字节；如果直接用 `std::string::size()` 和 `operator[]` 做 DP，算法计算的是“字节距离”而不是“字符距离” |
+| 修复 | 中文先通过 `split_utf8_characters()` 拆成完整码点字符串，编辑距离 DP 改为在 `vector<string>` 上比较；英文仍按单字母处理 |
+| 验证 | 使用“搜索/搜素”“中国/中囯”等单字符插入、删除、替换用例，修复后距离均按字符数变化；英文推荐结果保持不变 |
 
-### Bug 3：浏览器 favicon 探测被误记为 WARN
+可展示的实际修复代码：
+
+```cpp
+std::vector<std::string> split_word(const std::string& word,
+                                    const std::string& lang)
+{
+    if (lang == "en") {
+        std::vector<std::string> result;
+        for (char ch : word) {
+            result.emplace_back(1, ch);
+        }
+        return result;
+    }
+    return TextUtils::split_utf8_characters(word);
+}
+```
+
+代码位置：`src/online/KeywordRecommender.cc::split_word()`。
+
+推荐图：`docs/ppt_materials/09_bug_utf8_edit_distance.mmd`。
+
+### Bug 3：把 TCP 回调当成完整消息，TLV 出现半包和粘包错误
 
 | 项目 | 内容 |
 | --- | --- |
-| 现象 | `HTTP request failed ... file not found: /favicon.ico` |
-| 根因 | 浏览器自动请求图标；静态文件不存在被当成异常和 400 |
-| 修复 | 增加 `favicon.svg` 和页面声明；SVG MIME；缺失静态资源正常返回 404 |
-| 验证 | `/favicon.svg -> 200 image/svg+xml`；`/favicon.ico -> 404`，不产生 WARN |
+| 现象 | 请求偶发 JSON 解析失败；一次发送多条 TLV 时只处理第一条；报文被拆成多次到达时可能提前读取不完整 body |
+| 根因 | TCP 只提供连续字节流，不保留应用层消息边界；一次 `on_message` 既可能只有半条报文，也可能粘连多条报文。另外 TLV 的 4 字节长度从 `header+1` 开始，直接强转还存在未对齐访问和字节序问题 |
+| 修复 | 使用 muduo `Buffer` 累积数据；先 `peek()` 检查 5 字节头，再用 `memcpy + ntohl` 安全读取网络序长度；body 不完整时不消费缓冲区；上层用 `while` 循环拆出全部完整帧，并限制最大报文长度 |
+| 验证 | 将同一报文按“2 字节头/剩余头/body”分段送入时，只在完整后解码；把两条 TLV 拼接输入时可连续解出两条；超长 length 和非法 type 被拒绝 |
+
+可展示的实际修复代码：
+
+```cpp
+if (buffer->readableBytes() < 5) {
+    return false;                       // 半个头部：保留数据继续等待
+}
+
+uint32_t networkLength = 0;
+std::memcpy(&networkLength, buffer->peek() + 1, sizeof(networkLength));
+const uint32_t length = ntohl(networkLength);
+
+if (length > maxMessageSize) {
+    throw std::runtime_error("message is too large");
+}
+if (buffer->readableBytes() < 5 + length) {
+    return false;                       // body 未收齐：不能移动读指针
+}
+```
+
+上层处理粘包：
+
+```cpp
+while (ProtocolCodec::try_decode(buffer, request, maxMessageSize_)) {
+    uint8_t responseType = request.type;
+    std::string response = handle_request(
+        request.type, request.value, responseType);
+    conn->send(ProtocolCodec::encode(responseType, response));
+}
+```
+
+代码位置：`src/online/ProtocolCodec.cc::try_decode()`、
+`src/online/SearchServer.cc::on_message()`。
+
+推荐图：`docs/ppt_materials/10_bug_tlv_stream_framing.mmd`。
 
 ### 这一页的口头表达
 
-“我不只列了 Bug 名称，而是保留了现象、根因、修复和验证四个环节。第一个是检索正确性，
-第二个是性能缺陷，第三个是 HTTP 语义和日志分级问题。”
+“我不只列了 Bug 名称，而是保留了现象、根因、修复和验证四个环节。第一个是检索召回语义，
+第二个是 UTF-8 字符边界，第三个是 TCP 字节流的消息边界。它们分别对应搜索算法、文本处理和网络协议三个层次。”
 
 ---
 
@@ -624,6 +680,8 @@ W-TinyLFU 用 Window 接纳新数据，再用估算频率决定是否进入 Main
 | `06_wtinylfu_admission.mmd` | W-TinyLFU 准入与淘汰 | 备用 |
 | `07_singleflight_sequence.mmd` | 同 key 冷请求时序 | 备用 |
 | `08_bug_and_to_or.mmd` | 严格 AND 修复对比 | 13 |
+| `09_bug_utf8_edit_distance.mmd` | UTF-8 字节距离到字符距离 | 13 |
+| `10_bug_tlv_stream_framing.mmd` | TLV 半包、粘包与安全解码 | 13 |
 | `benchmark_data.csv` | V3/V3.1 QPS 和延迟作图数据 | 15 |
 
 ### Mermaid 导出建议

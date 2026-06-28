@@ -110,11 +110,12 @@
 ## Slide 13：三个典型 Bug 与解决方案
 
 - Bug 1：严格 AND 与 OOV 导致召回丢失；修复为忽略 OOV + OR + BM25。
-- Bug 2：HTTP/Redis 短连接与逐连接 INFO 日志拖慢端到端性能；修复连接复用和日志分级。
-- Bug 3：浏览器自动请求 favicon 被误记为 WARN；补充 SVG favicon，并让静态缺失返回正常 404。
+- Bug 2：中文编辑距离误按 UTF-8 字节计算；修复为按完整 Unicode 字符执行 DP。
+- Bug 3：把 TCP 回调误当成完整消息；通过 Buffer 累积、半包等待和循环解码处理 TLV 粘包/拆包。
 - 每个 Bug 都按照“现象—根因—修复—验证”表达。
 - 页面角色：三列案例卡片。
-- 内容来源：`docs/ppt_materials/08_bug_and_to_or.mmd` 与项目优化进度记录。
+- 内容来源：`docs/ppt_materials/08_bug_and_to_or.mmd`、`src/online/KeywordRecommender.cc`、
+  `src/online/ProtocolCodec.cc` 与 `src/online/SearchServer.cc`。
 
 ## Slide 14：日志与可观测性
 
@@ -167,7 +168,7 @@
 | 7 | `03_module_class_diagram.mmd` | 简化类图 | 保留类名、接口实现和关键依赖 |
 | 10 | `04_online_search_flow.mmd` | OR + BM25 流程 | 保留 OOV、posting 并集、排序和摘要链路 |
 | 11 | `05`～`07` Mermaid | 缓存主图与机制辅图 | 不改变命中、回源、准入和等待语义 |
-| 13 | `08_bug_and_to_or.mmd` | Bug 1 前后对照 | 保留 AND/OR 的语义差异 |
+| 13 | `08`～`10` Bug Mermaid | 三项 Bug 的前后对照 | 保留召回、UTF-8 字符边界和 TCP 消息边界语义 |
 | 15 | `benchmark_data.csv` | QPS/延迟图表 | 数值、单位和正负方向不得改变 |
 
 当前没有必须使用的现成位图、照片或机构 Logo。Mermaid 和 CSV 属于严格内容源，后续将先转换为可检查的视觉素材或把其结构化内容直接写入生成提示；不会用生成模型臆造性能数据。

@@ -1,0 +1,17 @@
+flowchart TD
+    TCP[TCP 字节流进入 muduo::Buffer] --> Header{可读字节 >= 5?}
+    Header -- 否 --> WaitHeader[保留 Buffer，等待剩余头部]
+    Header -- 是 --> Peek[peek 头部，不移动读指针]
+    Peek --> Length[memcpy 读取 length + ntohl 转主机序]
+    Length --> Limit{length <= maxMessageSize?}
+    Limit -- 否 --> Reject[拒绝异常报文]
+    Limit -- 是 --> Body{可读字节 >= 5 + length?}
+    Body -- 否 --> WaitBody[保留 Buffer，等待剩余 body]
+    Body -- 是 --> Decode[消费一条完整 TLV]
+    Decode --> Handle[处理请求并发送响应]
+    Handle --> More{Buffer 还有完整 TLV?}
+    More -- 是 --> Decode
+    More -- 否 --> End[结束本次回调]
+
+    WaitHeader --> TCP
+    WaitBody --> TCP

@@ -1,0 +1,17 @@
+flowchart LR
+    Query[中文查询：搜索] --> Before
+
+    subgraph Before[修复前：按 std::string 字节计算]
+        Bytes[搜 / 索各占 3 个 UTF-8 字节] --> ByteDP[DP 比较 char 字节]
+        ByteDP --> Wrong[一次汉字变化可能被计为多次编辑]
+        Wrong --> BadRank[推荐距离与排序异常]
+    end
+
+    subgraph After[修复后：按完整字符计算]
+        Split[split_utf8_characters] --> Tokens[vector：搜 / 索]
+        Tokens --> CharDP[DP 比较完整字符]
+        CharDP --> Correct[插入 / 删除 / 替换均按字符计数]
+        Correct --> Stable[距离正确，词频作为第二排序信号]
+    end
+
+    Before --> After

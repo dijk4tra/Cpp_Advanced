@@ -12,6 +12,8 @@
 | `06_wtinylfu_admission.mmd` | W-TinyLFU 分段和准入 |
 | `07_singleflight_sequence.mmd` | 同 key 并发冷请求时序 |
 | `08_bug_and_to_or.mmd` | 严格 AND 到忽略 OOV + OR 的修复 |
+| `09_bug_utf8_edit_distance.mmd` | 中文编辑距离从 UTF-8 字节到字符的修复 |
+| `10_bug_tlv_stream_framing.mmd` | TLV 半包、粘包、字节序与长度检查 |
 | `benchmark_data.csv` | 可直接导入 PPT/Excel 的性能对比数据 |
 
 完整逐页文稿见 `../项目第三期PPT汇报文稿与图表.md`。
