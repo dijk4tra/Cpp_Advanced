@@ -107,6 +107,8 @@ flowchart TD
 │   ├── 项目第三期HTTP压测报告-V3.1.md
 │   ├── 项目第三期缓存改造流程.md
 │   ├── 项目第三期开发进度.md
+│   ├── 项目第三期PPT汇报文稿与图表.md
+│   ├── ppt_materials/
 │   └── 项目第三期优化进度.md
 ├── include/
 │   ├── cache/

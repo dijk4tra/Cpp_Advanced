@@ -1,0 +1,17 @@
+flowchart TD
+    Q[用户 query] --> Cut[Jieba 分词]
+    Cut --> Filter[过滤停用词和噪声 token]
+    Filter --> OOV[忽略 OOV]
+    OOV --> Valid{有效词存在?}
+    Valid -- 否 --> Empty[返回空 results]
+    Valid -- 是 --> Union[各 posting list 求并集]
+    Union --> Score[逐文档累加 BM25 分数]
+    Score --> Sort[分数降序 / docId 稳定排序]
+    Sort --> TopK[取 TopK]
+    TopK --> Doc{文档缓存命中?}
+    Doc -- 否 --> Page[根据 offsets 按需读 pages.dat]
+    Doc -- 是 --> Abstract
+    Page --> Abstract{摘要缓存命中?}
+    Abstract -- 否 --> Generate[选相关窗口 + em 标红]
+    Abstract -- 是 --> JSON
+    Generate --> JSON[组装 JSON 响应]

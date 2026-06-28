@@ -1,0 +1,21 @@
+flowchart TD
+    Request[搜索 / 推荐请求] --> Key[归一化参数并构造版本化 key]
+    Key --> L1{L1 命中?}
+    L1 -- 是 --> Return[直接返回 JSON]
+    L1 -- 否 --> L2{Redis L2 命中?}
+    L2 -- 是 --> Backfill[回填 L1]
+    Backfill --> Return
+    L2 -- 否 --> Flight{同 key 正在回源?}
+    Flight -- 是 --> Wait[等待 owner 的 condition_variable]
+    Wait --> Return
+    Flight -- 否 --> Owner[成为 owner 并二次检查缓存]
+    Owner --> Compute[执行推荐或 BM25 搜索]
+    Compute --> Empty{空结果?}
+    Empty -- 是 --> ShortTTL[空结果短 TTL]
+    Empty -- 否 --> NormalTTL[普通 TTL]
+    ShortTTL --> Jitter[加 TTL 随机抖动]
+    NormalTTL --> Jitter
+    Jitter --> Put[写 L1 + Redis]
+    Put --> Notify[唤醒等待线程]
+    Notify --> Return
+

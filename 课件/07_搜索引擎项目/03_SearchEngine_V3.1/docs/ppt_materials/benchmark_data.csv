@@ -1,0 +1,9 @@
+metric,scenario,V3,V3.1,change_percent,better_direction
+QPS,search_concurrency_32,665.80,1015.54,52.53,higher
+QPS,suggest_concurrency_32,692.06,1410.41,103.80,higher
+QPS,scan_concurrency_32,762.06,1516.50,99.00,higher
+P50_ms,scan_concurrency_32,38.811,17.730,-54.32,lower
+P95_ms,scan_concurrency_32,81.354,50.197,-38.30,lower
+P99_ms,scan_concurrency_32,107.112,72.179,-32.61,lower
+QPS,search_keepalive_vs_close,699.32,1015.54,45.22,higher
+QPS,suggest_keepalive_vs_close,752.80,1410.41,87.36,higher

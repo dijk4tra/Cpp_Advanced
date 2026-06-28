@@ -1,0 +1,18 @@
+flowchart TD
+    Access[访问 key] --> Hash[哈希选择 Shard]
+    Hash --> Record[记录访问频率]
+    Record --> Hit{缓存命中?}
+    Hit -- 是 --> Segment{所在分段}
+    Segment -- Window --> WMru[移到 Window MRU]
+    Segment -- Probation --> Promote[晋升 Protected MRU]
+    Segment -- Protected --> PMru[移到 Protected MRU]
+    Hit -- 否 --> Insert[新数据进入 Window MRU]
+    Insert --> Overflow{Window 超容量?}
+    Overflow -- 否 --> End[完成]
+    Overflow -- 是 --> Candidate[取 Window LRU candidate]
+    Candidate --> MainFull{Main 已满?}
+    MainFull -- 否 --> Probation[进入 Probation MRU]
+    MainFull -- 是 --> Compare{freq(candidate) > freq(victim)?}
+    Compare -- 是 --> Replace[淘汰 victim 并接纳 candidate]
+    Compare -- 否 --> Reject[拒绝 candidate]
+

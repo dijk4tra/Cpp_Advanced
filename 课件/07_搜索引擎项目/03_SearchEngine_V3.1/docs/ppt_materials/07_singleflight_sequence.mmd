@@ -1,0 +1,25 @@
+sequenceDiagram
+    participant A as 请求 A
+    participant B as 请求 B
+    participant S as CachedSearchService
+    participant C as Cache
+    participant E as Search Engine
+
+    A->>S: search(same key)
+    S->>C: get(key)
+    C-->>S: miss
+    S->>S: 创建 InFlight，A 成为 owner
+    B->>S: search(same key)
+    S->>C: get(key)
+    C-->>S: miss
+    S->>S: 发现已有 InFlight
+    S-->>B: condition_variable 等待
+    S->>C: owner 二次检查
+    C-->>S: miss
+    S->>E: 只执行一次回源计算
+    E-->>S: JSON
+    S->>C: put(key, JSON)
+    S->>S: done=true, notify_all
+    S-->>A: JSON
+    S-->>B: 复用同一 JSON
+

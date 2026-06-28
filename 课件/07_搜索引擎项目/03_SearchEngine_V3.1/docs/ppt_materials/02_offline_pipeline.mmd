@@ -1,0 +1,26 @@
+flowchart TD
+    Start[启动 offline_builder] --> Config[读取 config.conf]
+    Config --> Keyword[关键词推荐数据]
+    Config --> Web[网页检索数据]
+
+    subgraph K[词典链路]
+        K1[扫描中英文语料] --> K2[清洗 / Jieba 分词]
+        K2 --> K3[停用词过滤 + 词频统计]
+        K3 --> K4[dict_cn / dict_en]
+        K4 --> K5[字符 -> 词典行号索引]
+    end
+
+    subgraph W[网页链路]
+        W1[解析 XML item] --> W2[提取 title link content]
+        W2 --> W3[64-bit SimHash 去重]
+        W3 --> W4[重新连续编号]
+        W4 --> W5[写 pages.dat / offsets.dat]
+        W4 --> W6[Jieba 分词与过滤]
+        W6 --> W7[统计 tf df dl N avgdl]
+        W7 --> W8[invert_index.dat]
+        W7 --> W9[bm25_doc_stats.dat]
+    end
+
+    Keyword --> K1
+    Web --> W1
+

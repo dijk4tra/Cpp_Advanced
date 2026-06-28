@@ -1,0 +1,64 @@
+classDiagram
+    class SearchServer {
+        -TcpServer server_
+        -CachedSearchService service_
+        +start()
+        -on_message()
+    }
+    class WebHttpServer {
+        -TcpServer server_
+        -CachedSearchService service_
+        +start()
+        -try_parse_request()
+    }
+    class CachedSearchService {
+        -Cache* cache_
+        -unordered_map inFlight_
+        +suggest()
+        +search()
+        -get_or_compute()
+    }
+    class Cache {
+        <<interface>>
+        +get(key,value) bool
+        +put(key,value,ttl)
+        +erase(key)
+    }
+    class ShardedWTinyLfuCache {
+        -shards_
+        -index
+        -window
+        -probation
+        -protectedEntries
+    }
+    class RedisCache {
+        -idleConnections_
+        -mutex poolMutex_
+        -condition_variable poolCondition_
+    }
+    class TwoLevelCache
+    class KeywordRecommender {
+        -dictionaries
+        -charIndexes
+    }
+    class WebSearcher {
+        -invertedIndex_
+        -documentLengths_
+        -PageLibrary pageLibrary_
+    }
+    class PageLibrary {
+        -unordered_map offsets_
+        +find(docId)
+    }
+
+    SearchServer --> CachedSearchService
+    WebHttpServer --> CachedSearchService
+    CachedSearchService --> Cache
+    CachedSearchService --> KeywordRecommender
+    CachedSearchService --> WebSearcher
+    TwoLevelCache ..|> Cache
+    ShardedWTinyLfuCache ..|> Cache
+    RedisCache ..|> Cache
+    TwoLevelCache --> ShardedWTinyLfuCache
+    TwoLevelCache --> RedisCache
+    WebSearcher --> PageLibrary

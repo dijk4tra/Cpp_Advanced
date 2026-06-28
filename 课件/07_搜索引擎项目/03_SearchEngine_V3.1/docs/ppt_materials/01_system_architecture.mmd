@@ -1,0 +1,27 @@
+flowchart LR
+    subgraph Offline[离线建库]
+        Corpus[中英文语料 / 网页 XML] --> Builder[offline_builder]
+        Builder --> Dict[词典 + 字符索引]
+        Builder --> Pages[pages.dat + offsets.dat]
+        Builder --> BM25[BM25 倒排索引 + 文档统计]
+    end
+
+    subgraph Online[在线服务]
+        Browser[浏览器] --> HTTP[WebHttpServer]
+        Client[TLV 客户端] --> TLV[SearchServer]
+        HTTP --> Service[CachedSearchService]
+        TLV --> Service
+        Service --> Recommender[KeywordRecommender]
+        Service --> Searcher[WebSearcher]
+    end
+
+    subgraph Cache[缓存层]
+        Service --> L1[L1 Sharded W-TinyLFU]
+        L1 --> L2[Redis L2 连接池]
+        Service --> Flight[singleflight]
+    end
+
+    Dict --> Recommender
+    BM25 --> Searcher
+    Pages --> Searcher
+

@@ -1,0 +1,15 @@
+flowchart LR
+    subgraph Before[修复前：严格 AND]
+        BQ[中国 + OOV] --> BOOV{OOV 在索引中?}
+        BOOV -- 否 --> BEmpty[整个查询返回空]
+        BOOV -- 是 --> Intersect[多个 posting list 求交集]
+        Intersect --> LowRecall[只保留同时命中全部词的文档]
+    end
+
+    subgraph After[修复后：忽略 OOV + OR]
+        AQ[中国 + OOV] --> Skip[跳过 OOV]
+        Skip --> Union[有效词 posting list 求并集]
+        Union --> Rank[BM25 累加排序]
+        Rank --> Recall[保留命中部分查询词的相关文档]
+    end
+
