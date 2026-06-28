@@ -6,7 +6,7 @@
 
 - PPT 页面只保留结论、关键数据和图，每页 3～6 个要点。
 - “口头讲稿”用于现场表达，不要整段复制到 PPT。
-- 默认按 12～15 分钟、18 页设计。若只有 8～10 分钟，可删除第 8、10、15 页。
+- 修订版按 15～18 分钟、22 页设计。新增四页分模块数据结构和一页 W-TinyLFU 专题；动态摘要单独成页。
 - Mermaid 源文件位于 `docs/ppt_materials/`，可在支持 Mermaid 的编辑器中导出 SVG/PNG。
 
 ### 建议时间分配
@@ -14,10 +14,11 @@
 | 部分 | 页码 | 时间 |
 | --- | --- | ---: |
 | 背景与架构 | 1～3 | 2 分钟 |
-| 功能演示 | 4～5 | 3 分钟 |
-| 模块、数据结构和算法 | 6～11 | 5 分钟 |
-| Bug、优化与数据 | 12～15 | 3 分钟 |
-| 不足、感悟与总结 | 16～18 | 2 分钟 |
+| 功能演示 | 4～5 | 2 分钟 |
+| 离线建库、模块与数据结构 | 6～11 | 5 分钟 |
+| 算法、缓存与动态摘要 | 12～16 | 4 分钟 |
+| Bug、日志与性能数据 | 17～19 | 3 分钟 |
+| 工程管理、路线与总结 | 20～22 | 2 分钟 |
 
 ---
 
@@ -82,14 +83,13 @@ curl -s -X POST http://127.0.0.1:18888/api/search \
 ### PPT 放什么
 
 ```text
-SearchEngine V3.1
+Pandex SearchEngine
 离线建库、BM25 检索、关键词推荐与多级缓存
-汇报人 / 日期
 ```
 
 ### 口头讲稿
 
-“我汇报的项目是 SearchEngine V3.1。它不只是一个可以输入关键词的页面，而是包含
+“我汇报的项目是 Pandex SearchEngine。它不只是一个可以输入关键词的页面，而是包含
 离线建库、在线推荐和搜索、TLV/HTTP 网络服务、两级缓存以及日志与压测的完整小型搜索引擎。”
 
 ---
@@ -243,32 +243,79 @@ build_inverted_index(invertIndex, docStats);
 
 ---
 
-## 第 8 页：各模块的核心数据结构
+## 第 8 页：离线模块的核心数据结构
 
-### PPT 表格
+### KeywordProcessor
 
-| 模块 | 核心数据结构 | 选择原因 |
-| --- | --- | --- |
-| 词典建库 | `map<string,int>`、`set<string>` | 稳定排序输出；停用词去重 |
-| 关键词推荐 | `vector<DictEntry>` | 词典行号直接作为下标 |
-| 字符索引 | `unordered_map<string, vector<int>>` | 字符快速召回词典行号 |
-| 倒排索引 | `unordered_map<string, unordered_map<int,int>>` | `word -> docId -> tf` 平均 O(1) 查找 |
-| OR 候选集 | `set<int>` | 合并 posting 时自动去重与稳定 docId |
-| 偏移库 | `unordered_map<int, PageOffset>` | docId 快速定位 pages.dat 字节区间 |
-| W-TinyLFU | `vector<unique_ptr<Shard>>` + `list` + `unordered_map` | 分片并发；链表 O(1) 移动；哈希 O(1) 定位 |
-| 频率估计 | 4-bit Count-Min Sketch + Bloom Doorkeeper | 固定内存、抗扫描污染 |
-| Redis 连接池 | `vector<redisContext*>` + `mutex` + `condition_variable` | 独占借出、有上限等待、连接复用 |
-| singleflight | `unordered_map<string, shared_ptr<InFlight>>` | 同 key 只保留一个回源 owner |
-| 网络缓冲 | `muduo::net::Buffer` | 处理 TCP 粘包、拆包和 HTTP 部分报文 |
+- `cppjieba::Jieba tokenizer_`：整个建库对象长期复用，避免重复加载分词词典。
+- `set<string> enStopWords_ / cnStopWords_`：停用词去重与查找。
+- 词频构建阶段使用 `map<string,int>` 统计，便于稳定有序输出。
+- 英文字符索引使用 `map<char,set<int>>`，中文使用 `map<string,set<int>>`，记录 `character -> lineNo...`；lineNo 从 1 开始并对应词典物理行。
+
+### PageProcessor
+
+- `vector<Document> documents_`：保存提取并最终去重的文档；`Document` 含 id/link/title/content。
+- `simhash::Simhasher hasher_`：生成 64-bit SimHash，当前逐一比较并以汉明距离 ≤ 3 判定近似重复。
+- `map<string, map<int,int>> invertedIndex_`：`word -> docId -> raw tf`；建库阶段还使用 `map<int,map<string,int>> docTermCount` 和 `map<int,int> docTotalWords` 累积每文档词频与 dl。
 
 ### 口头讲稿
 
-“数据结构的选择与操作特征对应。例如缓存需要 O(1) 找到节点，又需要 O(1) 移动 LRU 顺序，
-所以使用 `unordered_map + list`；Redis 同步连接不能被多线程同时使用，所以用有上限连接池独占借出。”
+“离线建库的容器偏向确定性和稳定输出。KeywordProcessor 复用分词器并分开管理中英文停用词；
+PageProcessor 在内存中保存去重后文档，再由同一组 docId 生成网页库、偏移库和倒排索引。”
 
 ---
 
-## 第 9 页：关键词推荐算法
+## 第 9 页：关键词查询模块的核心数据结构
+
+### PPT 要点
+
+- `DictEntry { string word; int frequency; }`。
+- `vector<DictEntry> cnDict_ / enDict_`；`dict[0]` 故意留空，使从 1 开始的 lineNo 可直接作为下标。
+- `CharIndex = unordered_map<string, vector<int>>`，保存“字符→包含它的词典行号”。
+- 查询字符先去重后召回候选行，再按 UTF-8 字符计算编辑距离。
+
+### 口头讲稿
+
+“这里的关键约定是行号。离线索引从 1 开始，在线词典向量就保留空的 0 号位，从而避免每次转换。
+CharIndex 先将整本词典缩小为候选行集，这一步决定推荐查询的基本效率。”
+
+---
+
+## 第 10 页：网页搜索模块的核心数据结构
+
+### PPT 要点
+
+- `unordered_map<string, PostingMap> invertedIndex_`，`PostingMap = unordered_map<int,int>`，即 `word -> docId -> raw tf`。
+- `set<int>` 作为 OR 候选集，合并 posting 时自动去重并稳定 docId。
+- `unordered_map<int,int> documentLengths_` 保存 dl；全局保存 N、avgdl、k1 和 b。
+- `PageLibrary::offsets_ = unordered_map<int,PageOffset>`，启动时只加载偏移，正文按 offset/length 从 `pages.dat` 按需读取。
+- `Cache* detailCache_` 对文档与动态摘要分别使用独立 TTL。
+
+### 口头讲稿
+
+“网页搜索的数据结构分成召回、排序和展示三部分。倒排索引和 set 生成候选集，文档长度表参与 BM25，
+PageLibrary 则避免启动时把所有正文加载进内存。”
+
+---
+
+## 第 11 页：缓存模块的核心数据结构
+
+### PPT 要点
+
+- `Cache` 抽象接口；`TwoLevelCache` 组合 `Cache* l1_ / l2_` 与 L1 回填 TTL。
+- `ShardedWTinyLfuCache`：`vector<unique_ptr<Shard>>`；Shard 内含 mutex、Window/Probation/Protected 三条 `list<Entry>` 与 `unordered_map<string,Location>`。
+- `TinyLfuFrequencySketch`：4 行 4-bit Count-Min Sketch + Bloom Doorkeeper + Frequency Aging。
+- `RedisCache`：`vector<redisContext*> idleConnections_` + mutex + condition_variable + `totalConnections_`。
+- `CachedSearchService`：`unordered_map<string, shared_ptr<InFlight>>`；每个 InFlight 含 mutex/cv/done/value/error。
+
+### 口头讲稿
+
+“缓存模块不是一个容器，而是几种并发状态的组合。L1 用分片锁和三段链表管理本地热数据；Redis 连接池保证同步连接独占借出；
+singleflight 使用每 key 共享状态合并重复回源。”
+
+---
+
+## 第 12 页：关键词推荐算法
 
 ### PPT 流程
 
@@ -295,7 +342,7 @@ build_inverted_index(invertIndex, docStats);
 
 ---
 
-## 第 10 页：网页检索——OR 召回 + BM25
+## 第 13 页：网页检索——OR 召回 + BM25
 
 ### 推荐图
 
@@ -338,7 +385,7 @@ return idf * tf * (bm25K1_ + 1.0) / (tf + bm25K1_ * norm);
 
 ---
 
-## 第 11 页：亮点——多级缓存与 singleflight
+## 第 14 页：多级缓存与 singleflight
 
 ### 推荐图
 
@@ -346,7 +393,7 @@ return idf * tf * (bm25K1_ + 1.0) / (tf + bm25K1_ * norm);
 - W-TinyLFU 准入：`docs/ppt_materials/06_wtinylfu_admission.mmd`
 - singleflight 时序：`docs/ppt_materials/07_singleflight_sequence.mmd`
 
-三张图不要同时挤在一页。主 PPT 建议放缓存流程，W-TinyLFU 和 singleflight 放备用页。
+本页主图放两级缓存与 singleflight 请求链。W-TinyLFU 准入与频率估计放到第 15 页专门讲解。
 
 ### 数据结构亮点
 
@@ -381,16 +428,53 @@ if (it == inFlight_.end()) {
 
 ---
 
-## 第 12 页：亮点——动态摘要与安全标红
+## 第 15 页：W-TinyLFU 专项讲解
+
+### 实际配置
+
+```text
+l1_cache_capacity = 4096
+l1_cache_shards = 32
+l1_wtinylfu_window_percent = 1
+l1_wtinylfu_protected_percent = 80
+l1_wtinylfu_frequency_sample_multiplier = 10
+```
+
+因为 4096 可被 32 整除，当前每分片容量为 128。按构造函数中的整数容量计算：Window 至少保留 1 个位置，因此 Window=1，Main=127，Protected 上限=`127*80/100=101`，Probation 可用 26，频率采样周期=`128*10=1280` 次访问。
+
+### 三分段与准入
+
+- 所有新 key 先进入 Window MRU，Window 超容量时取其 LRU 作 candidate。
+- Main 分成 Probation 和 Protected；Probation 再次命中后晋升 Protected。
+- Protected 超容量时，将 Protected LRU 降级到 Probation MRU，而不是直接淘汰。
+- Main 已满时，candidate 与 Probation LRU victim 比较近似频率。只有 `freq(candidate) > freq(victim)` 才替换；同频率保留 victim。
+
+### 频率估计
+
+- Doorkeeper 用两个 Bloom bit 记录本采样周期的首次访问，首次不写入 Sketch。
+- 从第二次访问起，在 4 行 Count-Min Sketch 各增加一个 4-bit 饱和计数器，最大值 15。
+- `estimate()` 取四行最小值，再根据 Doorkeeper 是否存在加 1，估算范围 0～16。
+- 访问数达到 `shardCapacity * 10` 后老化：所有 4-bit 计数减半，清空 Doorkeeper。
+
+### 口头讲稿
+
+“W-TinyLFU 同时利用时间局部性和频率信息。Window 让新热点有短暂观察机会，Main 保留稳定热点，TinyLFU 则把一次性扫描拦在 Main 外面。
+同频率不替换是一个刻意的保守策略：没有足够证据时，优先保留已经证明价值的 victim。”
+
+---
+
+## 第 16 页：动态摘要
 
 ### PPT 要点
 
-1. 清理 HTML 标签、实体和连续空白。
-2. 按 UTF-8 字符分割，避免截断中文字节。
-3. 以关键词命中位置构造候选窗口。
-4. 根据命中数、覆盖词数、紧密度和文章位置打分。
-5. 用 `<em>` 包围关键词。
-6. 前端 `safeAbstract()` 先转义其他 HTML，只恢复 `<em>`，降低 XSS 风险。
+1. 清理 HTML 标签、实体和连续空白，按 UTF-8 字符分割。
+2. 非法摘要长度回退为 150 字符；所有关键词都未命中时，返回正文开头作为兜底。
+3. 预计算每个关键词的全文命中位置，以每个命中位置为锚点构造候选窗口。
+4. 窗口默认从 `pos-50` 开始，再按摘要长度与正文范围修正 begin/end。
+5. 窗口分数为 `totalHits * positionWeight + coverageBonus + closeBonus`。
+6. 位置权重：正文前 20% 为 **1.30**，后 20% 为 **1.15**，中间 60% 为 **1.00**。
+7. 覆盖率最高增加 10 分；至少命中 2 个关键词且首尾距离 ≤ 40 字符时增加 5 分紧密度奖励。
+8. 返回最高分窗口，最后对查询词做 `<em>` 高亮；本页不展开前端安全处理。
 
 ### 实际代码摘录
 
@@ -399,25 +483,20 @@ double score = totalHits * position_weight(pos, chars.size())
              + coverageBonus
              + closeBonus;
 
-text.replace(pos, keyword.size(), "<em>" + keyword + "</em>");
+// position_weight(pos, total)
+// ratio <= 0.20 -> 1.30
+// ratio >= 0.80 -> 1.15
+// otherwise     -> 1.00
 ```
 
-```javascript
-function safeAbstract(value) {
-    return String(value)
-        .replaceAll("&", "&amp;")
-        .replaceAll("<em>", "\u0000")
-        .replaceAll("</em>", "\u0001")
-        .replaceAll("<", "&lt;")
-        .replaceAll(">", "&gt;")
-        .replaceAll("\u0000", "<em>")
-        .replaceAll("\u0001", "</em>");
-}
-```
+### 口头讲稿
+
+“动态摘要的关键是‘针对本次查询选窗口’，而不是从每篇文章头部固定截取。代码会对每个命中位置构造窗口，综合命中、覆盖、紧密度和位置打分。
+其中开头的位置权重 1.30，结尾 1.15，中间 1.00，体现了网页开头和结尾通常承载摘要或总结信息的先验。”
 
 ---
 
-## 第 13 页：典型 Bug 与解决方案
+## 第 17 页：典型 Bug 与解决方案
 
 ### Bug 1：严格 AND + OOV 导致召回丢失
 
@@ -511,7 +590,7 @@ while (ProtocolCodec::try_decode(buffer, request, maxMessageSize_)) {
 
 ---
 
-## 第 14 页：工程亮点——日志与可观测性
+## 第 18 页：工程亮点——日志与可观测性
 
 ### PPT 要点
 
@@ -538,7 +617,7 @@ tokenize_us=... recall_us=... rank_us=... render_us=... total_us=...
 
 ---
 
-## 第 15 页：性能优化结果
+## 第 19 页：性能优化结果
 
 ### 推荐表格
 
@@ -563,7 +642,7 @@ tokenize_us=... recall_us=... rank_us=... render_us=... total_us=...
 
 ---
 
-## 第 16 页：Git 与工程管理
+## 第 20 页：Git 与工程管理
 
 ### PPT 要点
 
@@ -590,7 +669,7 @@ ab5dc6b added_log_system/0627_23:56
 
 ---
 
-## 第 17 页：现有不足与改进方案
+## 第 21 页：现有不足与改进方案
 
 ### PPT 表格
 
@@ -616,7 +695,7 @@ P3：多机分片、增量索引和分布式部署
 
 ---
 
-## 第 18 页：项目感悟与总结
+## 第 22 页：项目感悟与总结
 
 ### PPT 要点
 
