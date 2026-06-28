@@ -110,6 +110,9 @@ std::string guess_content_type(const std::string& path)
     if (has_suffix(path, ".json")) {
         return "application/json; charset=utf-8";
     }
+    if (has_suffix(path, ".svg")) {
+        return "image/svg+xml";
+    }
     return "application/octet-stream";
 }
 }
@@ -377,7 +380,13 @@ std::string WebHttpServer::handle_static_file(const HttpRequest& request) const
     }
 
     std::string contentType;
-    std::string body = load_file(request.path, contentType);
+    std::string body;
+    if (!load_file(request.path, contentType, body)) {
+        // 浏览器可能主动探测 favicon、source map 等可选资源。资源不存在属于
+        // 正常的 HTTP 404，不应抛到 on_message 后被误记为请求处理异常 WARN。
+        return make_response(404, status_text(404), "text/plain; charset=utf-8",
+                             "not found", request.keepAlive);
+    }
     if (request.method == "HEAD") {
         // HEAD 只返回响应头，不返回实体内容。
         body.clear();
@@ -427,8 +436,12 @@ std::string WebHttpServer::make_json_error(int statusCode,
 
 /**
  * @brief 按请求路径读取静态文件。
+ * @return 文件读取成功返回 true；文件不存在或不可读时返回 false。
+ * @throws std::runtime_error 请求路径包含 `..` 时抛出，阻止目录穿越。
  */
-std::string WebHttpServer::load_file(const std::string& requestPath, std::string& contentType) const
+bool WebHttpServer::load_file(const std::string& requestPath,
+                              std::string& contentType,
+                              std::string& body) const
 {
     // 访问根路径时默认返回前端首页。
     // 三目运算符让根路径映射逻辑保持在一行：条件成立取 index.html，否则取原路径。
@@ -443,7 +456,7 @@ std::string WebHttpServer::load_file(const std::string& requestPath, std::string
     std::filesystem::path fullPath = std::filesystem::path(wwwRoot_) / relativePath.substr(1);
     std::ifstream ifs(fullPath, std::ios::binary);
     if (!ifs) {
-        throw std::runtime_error("file not found: " + requestPath);
+        return false;
     }
 
     std::ostringstream buffer;
@@ -451,5 +464,6 @@ std::string WebHttpServer::load_file(const std::string& requestPath, std::string
     // rdbuf() 返回文件流内部缓冲区，<< 可以把整个文件内容复制到字符串流。
     buffer << ifs.rdbuf();
     contentType = guess_content_type(fullPath.string());
-    return buffer.str();
+    body = buffer.str();
+    return true;
 }

@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Pandex">
+  <rect width="64" height="64" rx="14" fill="#17191d"/>
+  <circle cx="28" cy="28" r="15" fill="none" stroke="#f2c94c" stroke-width="6"/>
+  <path d="M39 39 52 52" fill="none" stroke="#f2c94c" stroke-width="7" stroke-linecap="round"/>
+  <path d="M20 28h16M28 20v16" stroke="#f5f5f5" stroke-width="4" stroke-linecap="round"/>
+</svg>

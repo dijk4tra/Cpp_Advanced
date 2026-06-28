@@ -1,27 +1,33 @@
-# SearchEngine V3 技术文档
+# SearchEngine V3.1 技术文档
 
-`03_SearchEngine_V3` 是搜索引擎项目第三期实现。当前项目保留第一期离线建库和第二期在线搜索能力，并在在线查询链路中加入缓存：
+`03_SearchEngine_V3.1` 是搜索引擎项目第三期的持续优化版，包含离线建库、TLV/HTTP
+在线查询、BM25 排序、多级缓存、浏览器前端和统一可观测性：
 
 1. `offline_builder`：离线建库程序，生成关键词推荐和网页搜索所需的数据文件。
 2. `search_server`：基于 `muduo` 的在线服务，同时提供 TLV 协议端口和浏览器 HTTP 端口。
-3. `cache`：第三期新增缓存层，当前实现 L1 分片完整 W-TinyLFU（可回退 LRU）、本机 Redis L2、二级缓存组合、singleflight、空结果缓存、TTL 抖动和缓存统计。
+3. `cache`：L1 分片完整 W-TinyLFU（可回退 LRU）、Redis L2 持久连接池、二级缓存组合、
+   singleflight、空结果缓存、TTL 抖动和缓存统计。
 
-第三期的核心变化：
+当前 V3.1 的核心能力：
 
 1. 关键词推荐最终 JSON 结果增加缓存。
 2. 网页搜索最终 JSON 结果增加缓存。
 3. 网页库正文不再启动时全量加载到内存，改为根据 `offsets.dat` 从 `pages.dat` 按需读取。
 4. 文档展示信息和动态摘要片段增加细粒度缓存。
 5. TLV 服务和 HTTP 服务统一依赖 `CachedSearchService`，避免两套入口重复实现缓存逻辑。
+6. 网页检索忽略 OOV 并使用 OR 召回，排序由 TF-IDF 升级为 BM25。
+7. HTTP/1.1 支持 keep-alive，Redis 使用有上限的持久连接池。
+8. spdlog 统一管理离线/在线日志，提供异步写入、按大小滚动、阶段耗时和慢请求日志。
+9. 前端静态资源和 JSON API 由同一 HTTP 服务直接返回，包含 favicon 和标准静态资源 404。
 
 ## 1. 项目目标
 
-当前 V3 项目包含三条完整链路。
+当前 V3.1 项目包含三条完整链路。
 
 离线建库链路：
 
 ```text
-原始语料 -> offline_builder -> 词典/字符索引/网页库/偏移库/倒排索引
+原始语料 -> offline_builder -> 词典/字符索引/网页库/偏移库/BM25 倒排索引与文档统计
 ```
 
 在线查询链路：
@@ -55,6 +61,7 @@ flowchart TD
     OFF --> P[data/index/pages.dat]
     OFF --> O[data/index/offsets.dat]
     OFF --> INV[data/index/invert_index.dat]
+    OFF --> STATS[data/index/bm25_doc_stats.dat]
 
     Client[TLV 客户端] <-->|TLV + JSON| ON
     Browser[浏览器] <-->|HTTP + JSON| ON
@@ -70,6 +77,7 @@ flowchart TD
     EI --> REC
     CI --> REC
     INV --> SEARCH
+    STATS --> SEARCH
     O --> SEARCH
     P -.按需读取.-> SEARCH
     SW --> SEARCH
@@ -93,11 +101,13 @@ flowchart TD
 │   └── index/
 ├── docs/
 │   ├── 项目第三期开发思路.md
+│   ├── 项目第三期进一步优化思路.md
 │   ├── 项目第三期缓存技术详解.md
 │   ├── 项目第三期HTTP压测报告.md
 │   ├── 项目第三期HTTP压测报告-V3.1.md
 │   ├── 项目第三期缓存改造流程.md
-│   └── 项目第三期开发进度.md
+│   ├── 项目第三期开发进度.md
+│   └── 项目第三期优化进度.md
 ├── include/
 │   ├── cache/
 │   │   ├── Cache.h
@@ -110,6 +120,7 @@ flowchart TD
 │   ├── common/
 │   │   ├── Config.h
 │   │   ├── DirectoryScanner.h
+│   │   ├── Logger.h
 │   │   └── TextUtils.h
 │   ├── offline/
 │   │   ├── KeywordProcessor.h
@@ -145,15 +156,17 @@ flowchart TD
 │   │   ├── cache_policy_test.cc
 │   │   ├── cache_policy_benchmark.cc
 │   │   └── sample_trace.txt
-│   └── http_load/
-│       ├── Makefile
-│       ├── README.md
-│       ├── http_load_test.py
-│       └── sample_queries.txt
+│   ├── http_load/
+│   │   ├── Makefile
+│   │   ├── README.md
+│   │   ├── http_load_test.py
+│   │   └── sample_queries.txt
+│   └── web_searcher_recall_test.cc
 └── www/
     ├── index.html
     ├── styles.css
     ├── app.js
+    ├── favicon.svg
     └── README.md
 ```
 
@@ -162,7 +175,7 @@ flowchart TD
 | 模块 | 作用 |
 | --- | --- |
 | `common` | 配置读取、目录扫描、UTF-8 和文本处理工具 |
-| `offline` | 第一期离线建库，生成在线查询所需数据 |
+| `offline` | V3.1 离线建库，生成词典、网页库、BM25 倒排索引和文档统计 |
 | `online` | muduo TLV 服务、HTTP 服务、推荐和搜索算法 |
 | `cache` | 第三期缓存接口、本地缓存、Redis 缓存、二级缓存和缓存服务层 |
 | `tests` | TLV 协议客户端、缓存策略测试/日志回放和 HTTP 端到端压测 |
@@ -207,9 +220,9 @@ spdlog
 必须从项目根目录运行，因为配置文件中的路径是相对路径。
 
 ```bash
-cd 课件/07_搜索引擎项目/03_SearchEngine_V3
-cmake -S . -B build
-cmake --build build
+cd 课件/07_搜索引擎项目/03_SearchEngine_V3.1
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
+cmake --build build -j2
 ```
 
 构建完成后生成：
@@ -227,9 +240,10 @@ hiredis
 muduo_net
 muduo_base
 pthread
+spdlog::spdlog
 ```
 
-如果缺少 `hiredis`、`tinyxml2` 或 `muduo`，CMake 配置阶段会直接报错。
+如果缺少 `spdlog`、`hiredis`、`tinyxml2` 或 `muduo`，CMake 配置阶段会直接报错。
 
 ### 3.3 运行离线建库
 
@@ -242,13 +256,12 @@ pthread
 1. 读取 `conf/config.conf`。
 2. 创建 `data/dict`、`data/index`、`bin`。
 3. 调用 `KeywordProcessor::process()` 生成中英文词典和字符索引。
-4. 调用 `PageProcessor::process()` 生成网页库、偏移库和倒排索引。
+4. 调用 `PageProcessor::process()` 生成网页库、偏移库、BM25 倒排索引和文档长度统计。
 
-成功结束时输出：
+成功结束时，控制台和 `logs/offline_builder.log` 会输出类似：
 
 ```text
-========== Build Finished ==========
-Output directories: data/dict, data/index
+offline build finished elapsed_ms=19676 output_dirs=data/dict,data/index
 ```
 
 ### 3.4 运行在线服务
@@ -261,7 +274,7 @@ Output directories: data/dict, data/index
 
 1. 读取 `conf/config.conf`。
 2. 加载中英文词典和字符索引。
-3. 加载中文停用词、网页偏移库和倒排索引。
+3. 加载中文停用词、网页偏移库、BM25 倒排索引和文档长度统计。
 4. 记录 `pages.dat` 路径，网页正文后续按需读取。
 5. 按配置创建 L1 本地缓存、Redis L2 缓存和 `TwoLevelCache`。
 6. 为 `WebSearcher` 设置文档展示信息缓存和动态摘要缓存。
@@ -275,14 +288,13 @@ Output directories: data/dict, data/index
 0.0.0.0:18888   浏览器 HTTP 服务
 ```
 
-启动成功时会输出：
+启动成功时，控制台和 `logs/search_server.log` 会输出类似：
 
 ```text
-========== SearchEngine V3 Online Server ==========
-[Cache] L1 enabled, capacity=4096, shards=32, ttl=600, empty_ttl=60
-[Cache] Redis L2 enabled, host=127.0.0.1, port=6379, db=0, pool_size=16
-[Online] TLV listen on 0.0.0.0:8888
-[Online] Web listen on http://0.0.0.0:18888
+L1 cache enabled policy=wtinylfu capacity=4096 shards=32 ttl=600 empty_ttl=60 ...
+Redis L2 enabled host=127.0.0.1 port=6379 db=0 pool_size=16 wait_timeout_ms=20
+TLV server listening address=0.0.0.0:8888 threads=4
+HTTP server listening address=0.0.0.0:18888 threads=8 keep_alive=true
 ```
 
 浏览器访问：
@@ -293,49 +305,27 @@ http://127.0.0.1:18888
 
 ## 4. 配置文件
 
-配置文件路径固定为 `conf/config.conf`，格式是简单的 `key=value`。
+配置文件路径固定为 `conf/config.conf`，格式是简单的 `key=value`。所有相对路径都以
+程序启动时的工作目录为基准，因此应从 V3.1 项目根目录运行二进制。
 
-### 4.1 离线与在线基础配置
+### 4.1 配置文件导航
 
-```text
-en_corpus_dir=data/corpus/EN
-cn_corpus_dir=data/corpus/CN
-webpage_corpus_dir=data/corpus/webpages
+`config.conf` 已按实际使用模块分为 `[01]`~`[09]` 九段：
 
-en_stop_words=data/stopwords/en_stopwords.txt
-cn_stop_words=data/stopwords/cn_stopwords.txt
+| 分区 | 主要 key/内容 | 主要使用者 |
+| --- | --- | --- |
+| `[01]` 离线输入 | `*_corpus_dir`、`*_stop_words` | `offline_builder` |
+| `[02]` 离线产物 | `*_dict`、`*_index`、`pages`、`offsets`、`bm25_doc_stats` | 离线生成，在线加载 |
+| `[03]` 检索结果 | `bm25_*`、`*_topk`、`abstract_length` | 推荐/搜索模块 |
+| `[04]` TLV 服务 | `server_*`、`io_threads`、`max_message_size` | `SearchServer` |
+| `[05]` HTTP 服务 | `http_*`、`www_root` | `WebHttpServer` |
+| `[06]` 日志 | `log_*`、`muduo_log_level`、`slow_request_ms` | 离线/在线进程 |
+| `[07]` 缓存总控 | `cache_enabled`、`cache_version`、`*_ttl_seconds` | 缓存业务层 |
+| `[08]` L1 | `l1_*` | 进程内缓存 |
+| `[09]` Redis L2 | `redis_*` | `RedisCache` |
 
-en_dict=data/dict/dict_en.dat
-cn_dict=data/dict/dict_cn.dat
-en_dict_index=data/index/index_en.dat
-cn_dict_index=data/index/index_cn.dat
-
-pages=data/index/pages.dat
-offsets=data/index/offsets.dat
-invert_index=data/index/invert_index.dat
-bm25_doc_stats=data/index/bm25_doc_stats.dat
-bm25_k1=1.5
-bm25_b=0.75
-
-server_ip=0.0.0.0
-server_port=8888
-http_port=18888
-io_threads=4
-http_threads=8
-http_max_request_size=1048576
-muduo_log_level=WARN
-log_level=info
-log_dir=logs
-log_max_file_size_mb=20
-log_max_files=5
-log_async_queue_size=8192
-slow_request_ms=200
-max_message_size=1048576
-keyword_topk=10
-web_topk=33
-abstract_length=200
-www_root=www
-```
+开关统一使用 `1=开启 / 0=关闭`；`_seconds` 和 `_ms` 分别表示秒和毫秒。离线数据重建或
+结果格式变化后应更新 `cache_version`，避免命中 Redis 中的旧结果。
 
 ### 4.2 缓存配置
 
@@ -412,6 +402,9 @@ redis_l1_backfill_ttl_seconds=600
 索引等阶段的开始、结束、耗时与统计。在线普通逐请求日志和搜索分阶段耗时放在
 DEBUG；默认 INFO 只保留启动配置、周期缓存统计；慢请求和可恢复异常使用 WARN，
 启动失败使用 CRITICAL。请求日志只记录 query/body 字节数，不主动记录原始查询词。
+
+需要查看每次 HTTP/TLV 请求、连接建立/断开和搜索阶段耗时时，将 `log_level`
+临时改为 `debug` 并重启服务。高并发压测建议保持 `info`，避免逐请求日志影响结果。
 
 `Config` 解析规则：
 
@@ -726,8 +719,8 @@ Redis 异常处理：
 
 ```text
 get 失败 -> 返回 false，按缓存未命中处理
-put 失败 -> 静默失败，不影响响应
-erase 失败 -> 静默失败
+put 失败 -> 不影响响应，按采样策略记录 WARN
+erase 失败 -> 不影响响应，按采样策略记录 WARN
 ```
 
 ### 7.4 二级缓存
@@ -813,7 +806,7 @@ flowchart TD
 统计日志示例：
 
 ```text
-[Cache] total=100 hit_rate=73.00% suggest_hit=30 suggest_miss=10 search_hit=43 search_miss=17 backend_compute=27 cache_put=27 empty_put=2 singleflight_wait=5
+cache stats total=100 hit_rate=73.00% suggest_hit=30 suggest_miss=10 search_hit=43 search_miss=17 backend_compute=27 cache_put=27 empty_put=2 singleflight_wait=5
 ```
 
 ## 8. 在线关键词推荐算法
@@ -1032,7 +1025,7 @@ TLV 外层消息格式：
 
 `WebHttpServer` 监听 `http_port`，默认 `18888`。它在同一个 `search_server` 进程中完成两件事：
 
-1. 返回静态文件：`/`、`/index.html`、`/styles.css`、`/app.js`。
+1. 返回静态文件：`/`、`/index.html`、`/styles.css`、`/app.js`、`/favicon.svg`。
 2. 提供 HTTP API：`POST /api/suggest`、`POST /api/search`。
 
 HTTP API 不通过 Python 代理，也不转发到 TLV 端口，而是直接调用当前进程中的 `CachedSearchService`。
@@ -1040,7 +1033,11 @@ HTTP API 不通过 Python 代理，也不转发到 TLV 端口，而是直接调�
 HTTP/1.1 默认启用 keep-alive，同一连接可以连续处理多条请求；客户端发送
 `Connection: close` 时响应后关闭连接。连接建立/断开日志使用 DEBUG 级别，默认
 INFO 环境不再为每个连接写日志。HTTP 工作线程默认 8，并通过
-`http_max_request_size` 限制单条请求大小。
+`http_max_request_size` 限制单条请求大小。线程数并非越大越好，V3.1 压测表明应在
+目标机器上按真实负载比较 2/4/8 线程。
+
+静态文件不存在时返回 HTTP 404，不会将浏览器对可选资源的探测误记为 WARN；
+包含 `..` 的路径仍作为非法请求拒绝。
 
 浏览器访问：
 
@@ -1123,16 +1120,21 @@ HTTP 接口的返回数量由服务端配置控制，浏览器请求不覆盖 `t
 ### 15.1 编译验证
 
 ```bash
-cmake -S . -B build
-cmake --build build
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
+cmake --build build -j2
+ctest --test-dir build --output-on-failure
 ```
 
-预期两个目标都构建成功：
+生产目标为 `offline_builder` 和 `search_server`。默认还会构建并执行 3 个 CTest：
 
 ```text
-Built target offline_builder
-Built target search_server
+cache_policy_test
+cache_policy_benchmark
+web_searcher_recall_test
 ```
+
+`web_searcher_recall_test` 使用当前真实离线索引验证部分 OOV 容错、多词 OR 召回和
+BM25 正分。如只需构建生产二进制，可传入 `-DBUILD_TESTING=OFF`。
 
 ### 15.2 启动 Redis
 
@@ -1200,6 +1202,35 @@ make
 `tests/cache_policy/`，HTTP P50/P95/P99 与 QPS 压测位于 `tests/http_load/`；
 测试总览见 `tests/README.md`。
 
+### 15.6 HTTP 端到端压测
+
+先启动 `search_server`，再从项目根目录执行：
+
+```bash
+python3 tests/http_load/http_load_test.py \
+  --mode search \
+  --requests 3000 \
+  --concurrency 32 \
+  --warmup 200 \
+  --connection-mode keep-alive
+```
+
+扫描污染工作负载：
+
+```bash
+python3 tests/http_load/http_load_test.py \
+  --mode search \
+  --workload scan \
+  --scan-namespace v31_scan_round_1 \
+  --requests 6200 \
+  --concurrency 32 \
+  --warmup 0
+```
+
+`--connection-mode close` 可对照短连接，`--query <new-key>` 可检查 singleflight 冷 key。
+每轮冷缓存测试应使用新 namespace/query，避免命中 Redis 旧结果。完整的 V3/V3.1
+对比见 `docs/项目第三期HTTP压测报告-V3.1.md`。
+
 ## 16. 当前实现边界
 
 当前第三期已经完成第一阶段到第十阶段缓存改造，仍保留以下边界：
@@ -1211,6 +1242,8 @@ make
 5. 网页搜索已使用 BM25；当前只索引正文，尚未实现标题字段加权的 BM25F。
 6. 动态摘要做轻量 HTML 清理，不实现完整 HTML 解析器。
 7. HTTP 服务已支持 keep-alive 和请求大小限制，但仍是课程项目的最小实现，不作为通用 Web 框架。
+8. HTTP 请求体仅支持 `Content-Length`，不支持 chunked request、TLS、完整 URL 解码或通用静态文件服务能力。
+9. 可观测性以本地日志为主，尚未接入 Prometheus metrics、request ID 或分布式 tracing。
 
 ## 17. 关键源码入口
 
@@ -1219,6 +1252,7 @@ make
 | 离线入口 | `src/offline/offline_main.cc` |
 | 在线入口 | `src/online/online_main.cc` |
 | 配置读取 | `src/common/Config.cc` |
+| 统一日志 | `src/common/Logger.cc` |
 | 关键词离线建库 | `src/offline/KeywordProcessor.cc` |
 | 网页离线建库 | `src/offline/PageProcessor.cc` |
 | 缓存接口 | `include/cache/Cache.h` |
@@ -1238,7 +1272,7 @@ make
 
 ## 18. 总结
 
-V3 当前实现已经形成“离线建库 + 在线查询 + 二级缓存”的结构：
+V3.1 当前实现已经形成“离线建库 + 在线查询 + 二级缓存 + 可观测性”的结构：
 
 ```text
 offline_builder 负责生成基础数据
@@ -1250,7 +1284,7 @@ WebSearcher 负责网页搜索、按需读取网页库和细粒度缓存
 第三期已落地的核心能力：
 
 1. L1 分片完整 W-TinyLFU 本地缓存，并保留分片 LRU 回退策略。
-2. hiredis Redis L2 缓存。
+2. hiredis Redis L2 缓存和有上限的持久连接池。
 3. L1 + L2 二级缓存组合。
 4. 关键词推荐和网页搜索最终结果缓存。
 5. 文档展示信息和动态摘要片段缓存。
@@ -1260,5 +1294,8 @@ WebSearcher 负责网页搜索、按需读取网页库和细粒度缓存
 9. 缓存命中率统计日志。
 10. 网页库正文按需从文件读取。
 11. Window LRU + Main SLRU + Count-Min Sketch + Doorkeeper + Frequency Aging。
+12. 忽略 OOV 的 OR 召回和 BM25 在线排序。
+13. HTTP/1.1 keep-alive、可调工作线程和静态资源 404。
+14. spdlog 异步滚动日志、阶段耗时和慢请求记录。
 
 缓存与连接优化阶段均已完成。后续工程优化可聚焦 Redis 熔断/pipeline、真实查询流量重复压测和基于运行指标的窗口比例调优。

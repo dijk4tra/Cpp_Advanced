@@ -136,7 +136,9 @@ private:
      * @return 文件内容。
      * @throws std::runtime_error 路径非法或文件不存在时抛出。
      */
-    std::string load_file(const std::string& requestPath, std::string& contentType) const;
+    bool load_file(const std::string& requestPath,
+                   std::string& contentType,
+                   std::string& body) const;
 
 private:
     // muduo TCP 服务对象，HTTP 端口和 TLV 端口分别由两个 TcpServer 监听。
