@@ -167,9 +167,30 @@
         }
       ],
       "requires_context_images": true,
-      "status": "pending",
-      "dispatch": null,
-      "result": null,
+      "status": "recorded",
+      "dispatch": {
+        "agent_id": "/root/slide_08",
+        "agent_nickname": "slide_08",
+        "prompt": "prompts/slide_08.json",
+        "prompt_sha256": "2dbbcbe61cade1dd194c0538c69d78884510ce31c581f28e11fdb41f0ad2ea18",
+        "dispatched_at": "2026-06-29T02:38:40Z"
+      },
+      "result": {
+        "agent_id": "/root/slide_08",
+        "backend_used": "built-in image tool",
+        "selected_source": "/mnt/c/Users/liwenshuo/.codex/generated_images/019f1131-ca72-7d93-ac3c-3e110c1392fb/exec-ccec99a2-fcc8-40b9-acc7-c9525f20cb73.png",
+        "selected_source_sha256": "68b4c8c791f593c18b6741ffc760a75e93863be04a2ab620b150c2401eb750fd",
+        "final_image": "origin_image/slide_08.png",
+        "final_image_sha256": "68b4c8c791f593c18b6741ffc760a75e93863be04a2ab620b150c2401eb750fd",
+        "expected_backend": "built-in image tool",
+        "expected_backend_labels": [
+          "built-in image tool",
+          "image_gen"
+        ],
+        "sample_generation_method_matched": true,
+        "qa_note": "源码与视觉复核通过：KeywordProcessor/PageProcessor 容器、64-bit SimHash、汉明距离<=3、离线产物及 docId 一致性准确，中文清晰无裁切。",
+        "recorded_at": "2026-06-29T02:46:17Z"
+      },
       "blocker": null
     },
     {
@@ -186,9 +207,30 @@
         }
       ],
       "requires_context_images": true,
-      "status": "pending",
-      "dispatch": null,
-      "result": null,
+      "status": "recorded",
+      "dispatch": {
+        "agent_id": "/root/slide_09",
+        "agent_nickname": "slide_09",
+        "prompt": "prompts/slide_09.json",
+        "prompt_sha256": "a4377a4da8df5b556daf51a8f0f322a6b4c35f4503b82d730d3e5ceddcb8d01a",
+        "dispatched_at": "2026-06-29T02:38:40Z"
+      },
+      "result": {
+        "agent_id": "/root/slide_09",
+        "backend_used": "built-in image tool",
+        "selected_source": "/mnt/c/Users/liwenshuo/.codex/generated_images/019f1135-37a8-7d91-919c-7a06d827a449/exec-1495c978-a74e-4be2-bbc8-5ce1847a113e.png",
+        "selected_source_sha256": "9d490f41f30b0d0e22d131daf0d4923cb9f1550cec41d321d5de5ed94b1525b4",
+        "final_image": "origin_image/slide_09.png",
+        "final_image_sha256": "9d490f41f30b0d0e22d131daf0d4923cb9f1550cec41d321d5de5ed94b1525b4",
+        "expected_backend": "built-in image tool",
+        "expected_backend_labels": [
+          "built-in image tool",
+          "image_gen"
+        ],
+        "sample_generation_method_matched": true,
+        "qa_note": "源码与视觉复核通过：dict[0] 占位、CharIndex、candidateLines 去重、lineNo 寻址和 UTF-8 编辑距离准确，中文清晰无裁切。",
+        "recorded_at": "2026-06-29T02:46:16Z"
+      },
       "blocker": null
     },
     {
@@ -205,9 +247,30 @@
         }
       ],
       "requires_context_images": true,
-      "status": "pending",
-      "dispatch": null,
-      "result": null,
+      "status": "recorded",
+      "dispatch": {
+        "agent_id": "/root/slide_10",
+        "agent_nickname": "slide_10",
+        "prompt": "prompts/slide_10.json",
+        "prompt_sha256": "cefd65a44f30e6fec94c64c44c890b548ca5fbf54d19cae583d12276c2004308",
+        "dispatched_at": "2026-06-29T02:38:40Z"
+      },
+      "result": {
+        "agent_id": "/root/slide_10",
+        "backend_used": "built-in image tool",
+        "selected_source": "/mnt/e/WangDao/Code/Cpp_Advanced/课件/07_搜索引擎项目/03_SearchEngine_V3.1/docs/ppt_output/SearchEngine_V3.1_项目汇报/generated_candidates/slide_10_candidate_v2.png",
+        "selected_source_sha256": "d54bc8664677f54f981556f4066b5f9e76cb6273abdc3216b0aa7f9e9b8535fe",
+        "final_image": "origin_image/slide_10.png",
+        "final_image_sha256": "d54bc8664677f54f981556f4066b5f9e76cb6273abdc3216b0aa7f9e9b8535fe",
+        "expected_backend": "built-in image tool",
+        "expected_backend_labels": [
+          "built-in image tool",
+          "image_gen"
+        ],
+        "sample_generation_method_matched": true,
+        "qa_note": "源码与视觉复核通过：倒排索引、OR 去重、BM25 状态和按需读取准确；detailCache_ 已修正为统一 Cache* 接口，以不同 key 和独立 TTL 区分文档与摘要。",
+        "recorded_at": "2026-06-29T03:13:00Z"
+      },
       "blocker": null
     },
     {
@@ -224,9 +287,30 @@
         }
       ],
       "requires_context_images": true,
-      "status": "pending",
-      "dispatch": null,
-      "result": null,
+      "status": "recorded",
+      "dispatch": {
+        "agent_id": "/root/slide_11",
+        "agent_nickname": "slide_11",
+        "prompt": "prompts/slide_11.json",
+        "prompt_sha256": "67d93b04e60136eaa201dafce1cb2a064e8819e5732fd46788003d7eeee6b4a4",
+        "dispatched_at": "2026-06-29T03:03:50Z"
+      },
+      "result": {
+        "agent_id": "/root/slide_11",
+        "backend_used": "built-in image tool",
+        "selected_source": "/mnt/c/Users/liwenshuo/.codex/generated_images/019f114c-63bc-79a2-98b9-a5c3dd5a0580/exec-1e804612-1b1b-4325-8fbb-c2d4b9142973.png",
+        "selected_source_sha256": "bda044cbc51cc8039758cfe67910228572c9734c3b6502308b7d9a63572022db",
+        "final_image": "origin_image/slide_11.png",
+        "final_image_sha256": "bda044cbc51cc8039758cfe67910228572c9734c3b6502308b7d9a63572022db",
+        "expected_backend": "built-in image tool",
+        "expected_backend_labels": [
+          "built-in image tool",
+          "image_gen"
+        ],
+        "sample_generation_method_matched": true,
+        "qa_note": "源码与视觉复核通过：Cache 三接口、Shard 三链表与索引、FrequencySketch、Redis 连接池成员及 InFlight 状态均准确，condition_variable 拼写正确，无裁切。",
+        "recorded_at": "2026-06-29T03:33:19Z"
+      },
       "blocker": null
     },
     {
@@ -300,9 +384,30 @@
         }
       ],
       "requires_context_images": true,
-      "status": "pending",
-      "dispatch": null,
-      "result": null,
+      "status": "recorded",
+      "dispatch": {
+        "agent_id": "/root/slide_15",
+        "agent_nickname": "slide_15",
+        "prompt": "prompts/slide_15.json",
+        "prompt_sha256": "6c3745ebbebea8b8ec5e8abe937489d15fa0de60f4a05734f65432d69a9d0939",
+        "dispatched_at": "2026-06-29T03:03:50Z"
+      },
+      "result": {
+        "agent_id": "/root/slide_15",
+        "backend_used": "built-in image tool",
+        "selected_source": "/mnt/c/Users/liwenshuo/.codex/generated_images/019f114e-d116-7492-ac22-41f2b4f9c4dc/exec-bb66e689-ee20-4a6d-a727-c1614011bb99.png",
+        "selected_source_sha256": "2f039628dfaecc41a2b0fcecccb325ffbbe16e90890165745f4e9bc9301a1c82",
+        "final_image": "origin_image/slide_15.png",
+        "final_image_sha256": "2f039628dfaecc41a2b0fcecccb325ffbbe16e90890165745f4e9bc9301a1c82",
+        "expected_backend": "built-in image tool",
+        "expected_backend_labels": [
+          "built-in image tool",
+          "image_gen"
+        ],
+        "sample_generation_method_matched": true,
+        "qa_note": "源码、配置与视觉复核通过：4096/32、128/1/127/101/26/1280 数值准确，严格 > 准入、同频拒绝、晋升降级与 Frequency Aging 方向正确。",
+        "recorded_at": "2026-06-29T03:13:00Z"
+      },
       "blocker": null
     },
     {
@@ -439,5 +544,5 @@
       "blocker": null
     }
   ],
-  "updated_at": "2026-06-28T15:36:50Z"
+  "updated_at": "2026-06-29T03:33:19Z"
 }
