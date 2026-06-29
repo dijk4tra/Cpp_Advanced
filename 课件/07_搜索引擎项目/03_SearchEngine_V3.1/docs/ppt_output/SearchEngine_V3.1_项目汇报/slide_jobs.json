@@ -1,17 +1,17 @@
 {
-  "run_status": "slides_recorded",
+  "run_status": "jobs_prepared",
   "deck_name": "SearchEngine_V3.1_项目汇报",
   "selected_backend": "built-in image tool",
   "sample_generation_method": {
     "backend_used": "built-in image tool",
     "tool_name": "image_gen",
     "mode": "generate",
-    "prompt_source": "conversation-approved Slide 10 hand-drawn whiteboard sample prompt",
-    "size": "16:9 landscape; request 4K-level clarity for dense slides; backend sample output 1672x941",
-    "quality": "built-in default high quality",
-    "approved_sample_path": "/mnt/e/WangDao/Code/Cpp_Advanced/课件/07_搜索引擎项目/03_SearchEngine_V3.1/docs/ppt_output/SearchEngine_V3.1_项目汇报/origin_image/slide_10.png",
-    "input_context_preparation": "parent inspects the approved sample and any local strict source images with view_image before built-in generation",
-    "handoff_rule": "Subagents must use the built-in image tool in generate mode and return a blocker if unavailable."
+    "prompt_source": "style_samples/slide_10_A_手绘白板风.png 对应的已确认风格样页",
+    "size": "16:9 landscape; dense slides should request 3840x2160 when the selected backend supports it",
+    "quality": "high",
+    "approved_sample_path": "/home/lws/my_project/Cpp_Advanced/课件/07_搜索引擎项目/03_SearchEngine_V3.1/docs/ppt_output/SearchEngine_V3.1_项目汇报/style_samples/slide_10_A_手绘白板风.png",
+    "input_context_preparation": "生成前先查看风格样页；封面还要查看第一版布局参考图",
+    "handoff_rule": "后续生成必须保持同一手绘白板视觉系统；不可用时应报告阻塞，不得改用程序绘图替代。"
   },
   "max_concurrent_slides": 3,
   "slides": [
@@ -23,36 +23,20 @@
       "out": "origin_image/slide_01.png",
       "input_images": [
         {
-          "path": "/mnt/e/WangDao/Code/Cpp_Advanced/课件/07_搜索引擎项目/03_SearchEngine_V3.1/docs/ppt_output/SearchEngine_V3.1_项目汇报/origin_image/slide_10.png",
-          "role": "approved sample slide style reference",
-          "fidelity": "match palette, marker texture, handwritten Chinese mood and visual identity; increase information density moderately; do not copy the exact layout"
+          "path": "/home/lws/my_project/Cpp_Advanced/课件/07_搜索引擎项目/03_SearchEngine_V3.1/docs/ppt_output/SearchEngine_V3.1_项目汇报/style_samples/slide_10_A_手绘白板风.png",
+          "role": "approved hand-drawn whiteboard style reference",
+          "fidelity": "match warm whiteboard background, marker texture, handwritten Chinese mood, palette and visual identity; vary layout by slide role"
+        },
+        {
+          "path": "/home/lws/my_project/Cpp_Advanced/课件/07_搜索引擎项目/03_SearchEngine_V3.1/docs/ppt_output/SearchEngine_V3.1_项目汇报/style_samples/slide_01_first_version_layout_reference.png",
+          "role": "strict layout and density reference only",
+          "fidelity": "preserve the three-zone panorama, central magnifier and bottom summary rhythm; replace every wrong or fictional label with verified project content"
         }
       ],
       "requires_context_images": true,
-      "status": "recorded",
-      "dispatch": {
-        "agent_id": "/root/slide_01",
-        "agent_nickname": "slide_01",
-        "prompt": "prompts/slide_01.json",
-        "prompt_sha256": "a5e8966b3b12296c9d0b64b501f04e8860e16b046bc7f25258c654a75bd1efa8",
-        "dispatched_at": "2026-06-28T12:08:57Z"
-      },
-      "result": {
-        "agent_id": "/root/slide_01",
-        "backend_used": "built-in image tool",
-        "selected_source": "/mnt/c/Users/liwenshuo/.codex/generated_images/019f0e21-bdc0-7de3-b124-90497fc50f6a/exec-b19343f9-64ff-4f0b-b87a-0df6616a52ab.png",
-        "selected_source_sha256": "a62eeff8b8dede6e3c80896155648a369e16cd0444689179075929c6e2aa8a70",
-        "final_image": "origin_image/slide_01.png",
-        "final_image_sha256": "a62eeff8b8dede6e3c80896155648a369e16cd0444689179075929c6e2aa8a70",
-        "expected_backend": "built-in image tool",
-        "expected_backend_labels": [
-          "built-in image tool",
-          "image_gen"
-        ],
-        "sample_generation_method_matched": true,
-        "qa_note": "重做后封面简洁，主线和三项关键词准确，无人物、界面、版本号或页码。",
-        "recorded_at": "2026-06-28T12:22:40Z"
-      },
+      "status": "pending",
+      "dispatch": null,
+      "result": null,
       "blocker": null
     },
     {
@@ -63,36 +47,15 @@
       "out": "origin_image/slide_02.png",
       "input_images": [
         {
-          "path": "/mnt/e/WangDao/Code/Cpp_Advanced/课件/07_搜索引擎项目/03_SearchEngine_V3.1/docs/ppt_output/SearchEngine_V3.1_项目汇报/origin_image/slide_10.png",
-          "role": "approved sample slide style reference",
-          "fidelity": "match palette, marker texture, handwritten Chinese mood and visual identity; increase information density moderately; do not copy the exact layout"
+          "path": "/home/lws/my_project/Cpp_Advanced/课件/07_搜索引擎项目/03_SearchEngine_V3.1/docs/ppt_output/SearchEngine_V3.1_项目汇报/style_samples/slide_10_A_手绘白板风.png",
+          "role": "approved hand-drawn whiteboard style reference",
+          "fidelity": "match warm whiteboard background, marker texture, handwritten Chinese mood, palette and visual identity; vary layout by slide role"
         }
       ],
       "requires_context_images": true,
-      "status": "recorded",
-      "dispatch": {
-        "agent_id": "/root/slide_02",
-        "agent_nickname": "slide_02",
-        "prompt": "prompts/slide_02.json",
-        "prompt_sha256": "8c0c45c97c219a9bdfccdf276b981af86b4cd3ac5a32f3b1810945ced820584d",
-        "dispatched_at": "2026-06-28T12:09:44Z"
-      },
-      "result": {
-        "agent_id": "/root/slide_02",
-        "backend_used": "built-in image tool",
-        "selected_source": "/mnt/c/Users/liwenshuo/.codex/generated_images/019f0e22-63c1-7980-b645-c4e8374b427c/exec-362f9eef-7f95-46e7-b837-9c65537b9306.png",
-        "selected_source_sha256": "c4a3d3c41a5f81c7d3a43c71d02df090cc9308ee00a4575705488b87d9d74f09",
-        "final_image": "origin_image/slide_02.png",
-        "final_image_sha256": "c4a3d3c41a5f81c7d3a43c71d02df090cc9308ee00a4575705488b87d9d74f09",
-        "expected_backend": "built-in image tool",
-        "expected_backend_labels": [
-          "built-in image tool",
-          "image_gen"
-        ],
-        "sample_generation_method_matched": true,
-        "qa_note": "双链路布局清晰；中文、术语与数值 3827、96379 准确可读；风格匹配批准样张。",
-        "recorded_at": "2026-06-28T12:14:10Z"
-      },
+      "status": "pending",
+      "dispatch": null,
+      "result": null,
       "blocker": null
     },
     {
@@ -103,36 +66,15 @@
       "out": "origin_image/slide_03.png",
       "input_images": [
         {
-          "path": "/mnt/e/WangDao/Code/Cpp_Advanced/课件/07_搜索引擎项目/03_SearchEngine_V3.1/docs/ppt_output/SearchEngine_V3.1_项目汇报/origin_image/slide_10.png",
-          "role": "approved sample slide style reference",
-          "fidelity": "match palette, marker texture, handwritten Chinese mood and visual identity; increase information density moderately; do not copy the exact layout"
+          "path": "/home/lws/my_project/Cpp_Advanced/课件/07_搜索引擎项目/03_SearchEngine_V3.1/docs/ppt_output/SearchEngine_V3.1_项目汇报/style_samples/slide_10_A_手绘白板风.png",
+          "role": "approved hand-drawn whiteboard style reference",
+          "fidelity": "match warm whiteboard background, marker texture, handwritten Chinese mood, palette and visual identity; vary layout by slide role"
         }
       ],
       "requires_context_images": true,
-      "status": "recorded",
-      "dispatch": {
-        "agent_id": "/root/slide_03",
-        "agent_nickname": "slide_03",
-        "prompt": "prompts/slide_03.json",
-        "prompt_sha256": "40f61a227c548205e58dd93514eed0308098db01df7125f0ecfe0fc11612fac3",
-        "dispatched_at": "2026-06-28T12:10:41Z"
-      },
-      "result": {
-        "agent_id": "/root/slide_03",
-        "backend_used": "built-in image tool",
-        "selected_source": "/mnt/c/Users/liwenshuo/.codex/generated_images/019f0e23-10b4-7972-a178-9bd74a798572/exec-624d4c71-2cf2-484b-af69-09c913c6db5e.png",
-        "selected_source_sha256": "c41f6ca8d713e076825d9e2499a0b51b21c4a6ef63d1ae616ab05f8f27c56264",
-        "final_image": "origin_image/slide_03.png",
-        "final_image_sha256": "c41f6ca8d713e076825d9e2499a0b51b21c4a6ef63d1ae616ab05f8f27c56264",
-        "expected_backend": "built-in image tool",
-        "expected_backend_labels": [
-          "built-in image tool",
-          "image_gen"
-        ],
-        "sample_generation_method_matched": true,
-        "qa_note": "三层架构与关键节点完整；共享业务层、加载关系及 L1→Redis L2/singleflight 语义清晰。",
-        "recorded_at": "2026-06-28T12:19:05Z"
-      },
+      "status": "pending",
+      "dispatch": null,
+      "result": null,
       "blocker": null
     },
     {
@@ -143,36 +85,15 @@
       "out": "origin_image/slide_04.png",
       "input_images": [
         {
-          "path": "/mnt/e/WangDao/Code/Cpp_Advanced/课件/07_搜索引擎项目/03_SearchEngine_V3.1/docs/ppt_output/SearchEngine_V3.1_项目汇报/origin_image/slide_10.png",
-          "role": "approved sample slide style reference",
-          "fidelity": "match palette, marker texture, handwritten Chinese mood and visual identity; increase information density moderately; do not copy the exact layout"
+          "path": "/home/lws/my_project/Cpp_Advanced/课件/07_搜索引擎项目/03_SearchEngine_V3.1/docs/ppt_output/SearchEngine_V3.1_项目汇报/style_samples/slide_10_A_手绘白板风.png",
+          "role": "approved hand-drawn whiteboard style reference",
+          "fidelity": "match warm whiteboard background, marker texture, handwritten Chinese mood, palette and visual identity; vary layout by slide role"
         }
       ],
       "requires_context_images": true,
-      "status": "recorded",
-      "dispatch": {
-        "agent_id": "/root/slide_04",
-        "agent_nickname": "slide_04",
-        "prompt": "prompts/slide_04.json",
-        "prompt_sha256": "07e19d8fba95843ec0db05a5afe56556d6c43c17e4b19704c79c10b70680ee36",
-        "dispatched_at": "2026-06-28T12:20:17Z"
-      },
-      "result": {
-        "agent_id": "/root/slide_04",
-        "backend_used": "built-in image tool",
-        "selected_source": "/mnt/c/Users/liwenshuo/.codex/generated_images/019f0e2b-e01e-7280-a9d2-7c790280ec1b/exec-04a7f3c7-04ec-4fc2-a96e-a8f0c9830647.png",
-        "selected_source_sha256": "0f66e43d0197ca9045ce02da9334097dd95759907113dda837eb3d678c3c2ca3",
-        "final_image": "origin_image/slide_04.png",
-        "final_image_sha256": "0f66e43d0197ca9045ce02da9334097dd95759907113dda837eb3d678c3c2ca3",
-        "expected_backend": "built-in image tool",
-        "expected_backend_labels": [
-          "built-in image tool",
-          "image_gen"
-        ],
-        "sample_generation_method_matched": true,
-        "qa_note": "重做后两组查询、200 ms 与地址准确；仅使用中性占位内容，无虚构结果数据。",
-        "recorded_at": "2026-06-28T12:34:23Z"
-      },
+      "status": "pending",
+      "dispatch": null,
+      "result": null,
       "blocker": null
     },
     {
@@ -183,36 +104,15 @@
       "out": "origin_image/slide_05.png",
       "input_images": [
         {
-          "path": "/mnt/e/WangDao/Code/Cpp_Advanced/课件/07_搜索引擎项目/03_SearchEngine_V3.1/docs/ppt_output/SearchEngine_V3.1_项目汇报/origin_image/slide_10.png",
-          "role": "approved sample slide style reference",
-          "fidelity": "match palette, marker texture, handwritten Chinese mood and visual identity; increase information density moderately; do not copy the exact layout"
+          "path": "/home/lws/my_project/Cpp_Advanced/课件/07_搜索引擎项目/03_SearchEngine_V3.1/docs/ppt_output/SearchEngine_V3.1_项目汇报/style_samples/slide_10_A_手绘白板风.png",
+          "role": "approved hand-drawn whiteboard style reference",
+          "fidelity": "match warm whiteboard background, marker texture, handwritten Chinese mood, palette and visual identity; vary layout by slide role"
         }
       ],
       "requires_context_images": true,
-      "status": "recorded",
-      "dispatch": {
-        "agent_id": "/root/slide_05",
-        "agent_nickname": "slide_05",
-        "prompt": "prompts/slide_05.json",
-        "prompt_sha256": "fd973db93be8c1432e4b058d8cb77edc43aad25efd8f6386499a68791ea4cce4",
-        "dispatched_at": "2026-06-28T12:21:23Z"
-      },
-      "result": {
-        "agent_id": "/root/slide_05",
-        "backend_used": "built-in image tool",
-        "selected_source": "/mnt/c/Users/liwenshuo/.codex/generated_images/019f0e2c-f1dc-72a1-9237-d77ef34f7e76/exec-278e2b82-d653-40a3-a832-418e70a0a407.png",
-        "selected_source_sha256": "00d6ce50092d6c93e940a28039c2bd0526e43dd82c42784c95ea86a701563c0d",
-        "final_image": "origin_image/slide_05.png",
-        "final_image_sha256": "00d6ce50092d6c93e940a28039c2bd0526e43dd82c42784c95ea86a701563c0d",
-        "expected_backend": "built-in image tool",
-        "expected_backend_labels": [
-          "built-in image tool",
-          "image_gen"
-        ],
-        "sample_generation_method_matched": true,
-        "qa_note": "重做后两条查询原文、OR/BM25/摘要/缓存链路完整，结果为无数值中性占位。",
-        "recorded_at": "2026-06-28T12:34:24Z"
-      },
+      "status": "pending",
+      "dispatch": null,
+      "result": null,
       "blocker": null
     },
     {
@@ -223,36 +123,15 @@
       "out": "origin_image/slide_06.png",
       "input_images": [
         {
-          "path": "/mnt/e/WangDao/Code/Cpp_Advanced/课件/07_搜索引擎项目/03_SearchEngine_V3.1/docs/ppt_output/SearchEngine_V3.1_项目汇报/origin_image/slide_10.png",
-          "role": "approved sample slide style reference",
-          "fidelity": "match palette, marker texture, handwritten Chinese mood and visual identity; increase information density moderately; do not copy the exact layout"
+          "path": "/home/lws/my_project/Cpp_Advanced/课件/07_搜索引擎项目/03_SearchEngine_V3.1/docs/ppt_output/SearchEngine_V3.1_项目汇报/style_samples/slide_10_A_手绘白板风.png",
+          "role": "approved hand-drawn whiteboard style reference",
+          "fidelity": "match warm whiteboard background, marker texture, handwritten Chinese mood, palette and visual identity; vary layout by slide role"
         }
       ],
       "requires_context_images": true,
-      "status": "recorded",
-      "dispatch": {
-        "agent_id": "/root/slide_06",
-        "agent_nickname": "slide_06",
-        "prompt": "prompts/slide_06.json",
-        "prompt_sha256": "39146070ef37890fea791fe06ff7658cf9a696d3f09d5c626c7df414552ffbaa",
-        "dispatched_at": "2026-06-28T12:24:13Z"
-      },
-      "result": {
-        "agent_id": "/root/slide_06",
-        "backend_used": "built-in image tool",
-        "selected_source": "/mnt/c/Users/liwenshuo/.codex/generated_images/019f0e2f-37ef-7020-afe4-5c4de766ebd6/exec-5fabf217-81dc-4c97-afed-3ed093ccd5be.png",
-        "selected_source_sha256": "49755e8b1ebfa618cc61f606d8d3f9968e9072f5e89d4618d7f5441ee8eee53b",
-        "final_image": "origin_image/slide_06.png",
-        "final_image_sha256": "49755e8b1ebfa618cc61f606d8d3f9968e9072f5e89d4618d7f5441ee8eee53b",
-        "expected_backend": "built-in image tool",
-        "expected_backend_labels": [
-          "built-in image tool",
-          "image_gen"
-        ],
-        "sample_generation_method_matched": true,
-        "qa_note": "双离线流程、产物名、docId 一致性与 37/4365/3827/613.600 统计准确。",
-        "recorded_at": "2026-06-28T12:34:24Z"
-      },
+      "status": "pending",
+      "dispatch": null,
+      "result": null,
       "blocker": null
     },
     {
@@ -263,454 +142,302 @@
       "out": "origin_image/slide_07.png",
       "input_images": [
         {
-          "path": "/mnt/e/WangDao/Code/Cpp_Advanced/课件/07_搜索引擎项目/03_SearchEngine_V3.1/docs/ppt_output/SearchEngine_V3.1_项目汇报/origin_image/slide_10.png",
-          "role": "approved sample slide style reference",
-          "fidelity": "match palette, marker texture, handwritten Chinese mood and visual identity; increase information density moderately; do not copy the exact layout"
+          "path": "/home/lws/my_project/Cpp_Advanced/课件/07_搜索引擎项目/03_SearchEngine_V3.1/docs/ppt_output/SearchEngine_V3.1_项目汇报/style_samples/slide_10_A_手绘白板风.png",
+          "role": "approved hand-drawn whiteboard style reference",
+          "fidelity": "match warm whiteboard background, marker texture, handwritten Chinese mood, palette and visual identity; vary layout by slide role"
         }
       ],
       "requires_context_images": true,
-      "status": "recorded",
-      "dispatch": {
-        "agent_id": "/root/slide_07",
-        "agent_nickname": "slide_07",
-        "prompt": "prompts/slide_07.json",
-        "prompt_sha256": "b0740d6696e13152c5654c586af9cb4fc93f855e2dace8213fc9298484aabef4",
-        "dispatched_at": "2026-06-28T12:36:29Z"
-      },
-      "result": {
-        "agent_id": "/root/slide_07",
-        "backend_used": "built-in image tool",
-        "selected_source": "/mnt/c/Users/liwenshuo/.codex/generated_images/019f0e3a-4c0a-7d32-a545-33e0a404ee77/exec-1f8528b2-99d8-46c6-b840-1f9d182ef550.png",
-        "selected_source_sha256": "c82e168b5c3673bd03f32ddd049f6e8de3ec19b9528fa096dec8bd2437e81b9b",
-        "final_image": "origin_image/slide_07.png",
-        "final_image_sha256": "c82e168b5c3673bd03f32ddd049f6e8de3ec19b9528fa096dec8bd2437e81b9b",
-        "expected_backend": "built-in image tool",
-        "expected_backend_labels": [
-          "built-in image tool",
-          "image_gen"
-        ],
-        "sample_generation_method_matched": true,
-        "qa_note": "类名、网络→业务→检索/缓存依赖、Cache 实现关系与 WebSearcher→PageLibrary 均可辨。",
-        "recorded_at": "2026-06-28T12:49:23Z"
-      },
+      "status": "pending",
+      "dispatch": null,
+      "result": null,
       "blocker": null
     },
     {
       "slide_id": "slide_08",
       "number": 8,
-      "title": "各模块的核心数据结构",
+      "title": "离线模块的核心数据结构",
       "job": "prompts/slide_08.json",
       "out": "origin_image/slide_08.png",
       "input_images": [
         {
-          "path": "/mnt/e/WangDao/Code/Cpp_Advanced/课件/07_搜索引擎项目/03_SearchEngine_V3.1/docs/ppt_output/SearchEngine_V3.1_项目汇报/origin_image/slide_10.png",
-          "role": "approved sample slide style reference",
-          "fidelity": "match palette, marker texture, handwritten Chinese mood and visual identity; increase information density moderately; do not copy the exact layout"
+          "path": "/home/lws/my_project/Cpp_Advanced/课件/07_搜索引擎项目/03_SearchEngine_V3.1/docs/ppt_output/SearchEngine_V3.1_项目汇报/style_samples/slide_10_A_手绘白板风.png",
+          "role": "approved hand-drawn whiteboard style reference",
+          "fidelity": "match warm whiteboard background, marker texture, handwritten Chinese mood, palette and visual identity; vary layout by slide role"
         }
       ],
       "requires_context_images": true,
-      "status": "recorded",
-      "dispatch": {
-        "agent_id": "/root/slide_08",
-        "agent_nickname": "slide_08",
-        "prompt": "prompts/slide_08.json",
-        "prompt_sha256": "44be60abae13102848af87057b3df6b28e50982c49df5bdebe2bf1f4a64d3def",
-        "dispatched_at": "2026-06-28T12:38:29Z"
-      },
-      "result": {
-        "agent_id": "/root/slide_08",
-        "backend_used": "built-in image tool",
-        "selected_source": "/mnt/c/Users/liwenshuo/.codex/generated_images/019f0e3c-2af7-75f0-b0a6-35f141ecb923/exec-76e5d343-1629-43c1-aefa-55b039011733.png",
-        "selected_source_sha256": "673af0a460562f32b040480993d571c295ad7f428fac600f27bfc29ddd962303",
-        "final_image": "origin_image/slide_08.png",
-        "final_image_sha256": "673af0a460562f32b040480993d571c295ad7f428fac600f27bfc29ddd962303",
-        "expected_backend": "built-in image tool",
-        "expected_backend_labels": [
-          "built-in image tool",
-          "image_gen"
-        ],
-        "sample_generation_method_matched": true,
-        "qa_note": "四象限结构完整，C++ 类型与推荐/检索/缓存/并发的用途对应清晰。",
-        "recorded_at": "2026-06-28T12:49:23Z"
-      },
+      "status": "pending",
+      "dispatch": null,
+      "result": null,
       "blocker": null
     },
     {
       "slide_id": "slide_09",
       "number": 9,
-      "title": "关键词推荐算法",
+      "title": "关键词查询模块的核心数据结构",
       "job": "prompts/slide_09.json",
       "out": "origin_image/slide_09.png",
       "input_images": [
         {
-          "path": "/mnt/e/WangDao/Code/Cpp_Advanced/课件/07_搜索引擎项目/03_SearchEngine_V3.1/docs/ppt_output/SearchEngine_V3.1_项目汇报/origin_image/slide_10.png",
-          "role": "approved sample slide style reference",
-          "fidelity": "match palette, marker texture, handwritten Chinese mood and visual identity; increase information density moderately; do not copy the exact layout"
+          "path": "/home/lws/my_project/Cpp_Advanced/课件/07_搜索引擎项目/03_SearchEngine_V3.1/docs/ppt_output/SearchEngine_V3.1_项目汇报/style_samples/slide_10_A_手绘白板风.png",
+          "role": "approved hand-drawn whiteboard style reference",
+          "fidelity": "match warm whiteboard background, marker texture, handwritten Chinese mood, palette and visual identity; vary layout by slide role"
         }
       ],
       "requires_context_images": true,
-      "status": "recorded",
-      "dispatch": {
-        "agent_id": "/root/slide_09",
-        "agent_nickname": "slide_09",
-        "prompt": "prompts/slide_09.json",
-        "prompt_sha256": "cf774d31aa77e98b029c2c630955e4095cae1ba00c1b9e8b1ae45e4515e670a7",
-        "dispatched_at": "2026-06-28T12:40:29Z"
-      },
-      "result": {
-        "agent_id": "/root/slide_09",
-        "backend_used": "built-in image tool",
-        "selected_source": "/mnt/c/Users/liwenshuo/.codex/generated_images/019f0e3d-fe42-71e3-92ed-b9178a099bc5/exec-324d1258-5626-4d99-992a-0d92af900dd2.png",
-        "selected_source_sha256": "814384bb0e2ae471a64ee7c08e111ae05c18e8fa4ca6679117c2fa2ff94bea11",
-        "final_image": "origin_image/slide_09.png",
-        "final_image_sha256": "814384bb0e2ae471a64ee7c08e111ae05c18e8fa4ca6679117c2fa2ff94bea11",
-        "expected_backend": "built-in image tool",
-        "expected_backend_labels": [
-          "built-in image tool",
-          "image_gen"
-        ],
-        "sample_generation_method_matched": true,
-        "qa_note": "重做后 UTF-8 字符示例搜索→搜素、一次替换和编辑距离 1 一致；排序规则与能力边界准确。",
-        "recorded_at": "2026-06-28T13:03:37Z"
-      },
+      "status": "pending",
+      "dispatch": null,
+      "result": null,
       "blocker": null
     },
     {
       "slide_id": "slide_10",
       "number": 10,
-      "title": "网页检索——OR 召回与 BM25",
+      "title": "网页搜索模块的核心数据结构",
       "job": "prompts/slide_10.json",
       "out": "origin_image/slide_10.png",
-      "input_images": [],
-      "requires_context_images": false,
-      "status": "accepted",
+      "input_images": [
+        {
+          "path": "/home/lws/my_project/Cpp_Advanced/课件/07_搜索引擎项目/03_SearchEngine_V3.1/docs/ppt_output/SearchEngine_V3.1_项目汇报/style_samples/slide_10_A_手绘白板风.png",
+          "role": "approved hand-drawn whiteboard style reference",
+          "fidelity": "match warm whiteboard background, marker texture, handwritten Chinese mood, palette and visual identity; vary layout by slide role"
+        }
+      ],
+      "requires_context_images": true,
+      "status": "pending",
       "dispatch": null,
-      "result": {
-        "final_image": "origin_image/slide_10.png",
-        "accepted_sample": true
-      },
+      "result": null,
       "blocker": null
     },
     {
       "slide_id": "slide_11",
       "number": 11,
-      "title": "多级缓存与 singleflight",
+      "title": "缓存模块的核心数据结构",
       "job": "prompts/slide_11.json",
       "out": "origin_image/slide_11.png",
       "input_images": [
         {
-          "path": "/mnt/e/WangDao/Code/Cpp_Advanced/课件/07_搜索引擎项目/03_SearchEngine_V3.1/docs/ppt_output/SearchEngine_V3.1_项目汇报/origin_image/slide_10.png",
-          "role": "approved sample slide style reference",
-          "fidelity": "match palette, marker texture, handwritten Chinese mood and visual identity; increase information density moderately; do not copy the exact layout"
+          "path": "/home/lws/my_project/Cpp_Advanced/课件/07_搜索引擎项目/03_SearchEngine_V3.1/docs/ppt_output/SearchEngine_V3.1_项目汇报/style_samples/slide_10_A_手绘白板风.png",
+          "role": "approved hand-drawn whiteboard style reference",
+          "fidelity": "match warm whiteboard background, marker texture, handwritten Chinese mood, palette and visual identity; vary layout by slide role"
         }
       ],
       "requires_context_images": true,
-      "status": "recorded",
-      "dispatch": {
-        "agent_id": "/root/slide_11",
-        "agent_nickname": "slide_11",
-        "prompt": "prompts/slide_11.json",
-        "prompt_sha256": "bc2580c9e8165117b33e829301f815790f688b65b7f18ace10323194aaa0ea32",
-        "dispatched_at": "2026-06-28T12:53:58Z"
-      },
-      "result": {
-        "agent_id": "/root/slide_11",
-        "backend_used": "built-in image tool",
-        "selected_source": "/mnt/c/Users/liwenshuo/.codex/generated_images/019f0e49-d100-7062-a858-090f0a88aae3/exec-cb3d8f15-17a7-4f1b-a948-f9e7ab7d46fa.png",
-        "selected_source_sha256": "db6044a1d776470f80407be592b7d63a0e719891df3c2395f31d8671b703ebd0",
-        "final_image": "origin_image/slide_11.png",
-        "final_image_sha256": "db6044a1d776470f80407be592b7d63a0e719891df3c2395f31d8671b703ebd0",
-        "expected_backend": "built-in image tool",
-        "expected_backend_labels": [
-          "built-in image tool",
-          "image_gen"
-        ],
-        "sample_generation_method_matched": true,
-        "qa_note": "L1/L2 命中回填、owner/waiter、二次检查、TTL 抖动与 W-TinyLFU 准入语义完整。",
-        "recorded_at": "2026-06-28T13:03:38Z"
-      },
+      "status": "pending",
+      "dispatch": null,
+      "result": null,
       "blocker": null
     },
     {
       "slide_id": "slide_12",
       "number": 12,
-      "title": "动态摘要与安全标红",
+      "title": "关键词推荐算法",
       "job": "prompts/slide_12.json",
       "out": "origin_image/slide_12.png",
       "input_images": [
         {
-          "path": "/mnt/e/WangDao/Code/Cpp_Advanced/课件/07_搜索引擎项目/03_SearchEngine_V3.1/docs/ppt_output/SearchEngine_V3.1_项目汇报/origin_image/slide_10.png",
-          "role": "approved sample slide style reference",
-          "fidelity": "match palette, marker texture, handwritten Chinese mood and visual identity; increase information density moderately; do not copy the exact layout"
+          "path": "/home/lws/my_project/Cpp_Advanced/课件/07_搜索引擎项目/03_SearchEngine_V3.1/docs/ppt_output/SearchEngine_V3.1_项目汇报/style_samples/slide_10_A_手绘白板风.png",
+          "role": "approved hand-drawn whiteboard style reference",
+          "fidelity": "match warm whiteboard background, marker texture, handwritten Chinese mood, palette and visual identity; vary layout by slide role"
         }
       ],
       "requires_context_images": true,
-      "status": "recorded",
-      "dispatch": {
-        "agent_id": "/root/slide_12",
-        "agent_nickname": "slide_12",
-        "prompt": "prompts/slide_12.json",
-        "prompt_sha256": "9ca9b77ac7273ee52cafe1ec25e588da3e7d4c2ec83ea2ab0bb8009a416887f4",
-        "dispatched_at": "2026-06-28T12:56:36Z"
-      },
-      "result": {
-        "agent_id": "/root/slide_12",
-        "backend_used": "built-in image tool",
-        "selected_source": "/mnt/c/Users/liwenshuo/.codex/generated_images/019f0e4c-6fbd-70f1-8248-16a91d0c78ad/exec-7f444e58-2602-4536-9335-3f253bfcf50f.png",
-        "selected_source_sha256": "c491e05f4ed63e0f9cf5601525d617fd93e480fe6001e3a570621040d8e79948",
-        "final_image": "origin_image/slide_12.png",
-        "final_image_sha256": "c491e05f4ed63e0f9cf5601525d617fd93e480fe6001e3a570621040d8e79948",
-        "expected_backend": "built-in image tool",
-        "expected_backend_labels": [
-          "built-in image tool",
-          "image_gen"
-        ],
-        "sample_generation_method_matched": true,
-        "qa_note": "六步摘要链路与后端仅标记 em、前端转义其他 HTML 再恢复 em 的安全边界准确。",
-        "recorded_at": "2026-06-28T13:03:38Z"
-      },
+      "status": "pending",
+      "dispatch": null,
+      "result": null,
       "blocker": null
     },
     {
       "slide_id": "slide_13",
       "number": 13,
-      "title": "三个典型 Bug 与解决方案",
+      "title": "网页检索——OR 召回与 BM25",
       "job": "prompts/slide_13.json",
       "out": "origin_image/slide_13.png",
       "input_images": [
         {
-          "path": "/mnt/e/WangDao/Code/Cpp_Advanced/课件/07_搜索引擎项目/03_SearchEngine_V3.1/docs/ppt_output/SearchEngine_V3.1_项目汇报/origin_image/slide_10.png",
-          "role": "approved sample slide style reference",
-          "fidelity": "match palette, marker texture, handwritten Chinese mood and visual identity; increase information density moderately; do not copy the exact layout"
+          "path": "/home/lws/my_project/Cpp_Advanced/课件/07_搜索引擎项目/03_SearchEngine_V3.1/docs/ppt_output/SearchEngine_V3.1_项目汇报/style_samples/slide_10_A_手绘白板风.png",
+          "role": "approved hand-drawn whiteboard style reference",
+          "fidelity": "match warm whiteboard background, marker texture, handwritten Chinese mood, palette and visual identity; vary layout by slide role"
         }
       ],
       "requires_context_images": true,
-      "status": "recorded",
-      "dispatch": {
-        "agent_id": "/root/slide_13",
-        "agent_nickname": "slide_13",
-        "prompt": "prompts/slide_13.json",
-        "prompt_sha256": "90f9d6c595f72c847a2dbb6b409e7baef33a3f843f81750e65fa47db54fa06ec",
-        "dispatched_at": "2026-06-28T13:06:21Z"
-      },
-      "result": {
-        "agent_id": "/root/slide_13",
-        "backend_used": "built-in image tool",
-        "selected_source": "/mnt/c/Users/liwenshuo/.codex/generated_images/019f0e55-5031-7c33-974b-9307c82fca5e/exec-ae596e4a-9882-4189-9e29-7ca0cfbedd2c.png",
-        "selected_source_sha256": "c42f9b7ac1acfc6b34da36fb1a35fd8c7591d4c4f99f3fdf7dd8a64e12534f5e",
-        "final_image": "origin_image/slide_13.png",
-        "final_image_sha256": "c42f9b7ac1acfc6b34da36fb1a35fd8c7591d4c4f99f3fdf7dd8a64e12534f5e",
-        "expected_backend": "built-in image tool",
-        "expected_backend_labels": [
-          "built-in image tool",
-          "image_gen"
-        ],
-        "sample_generation_method_matched": true,
-        "qa_note": "重做后 Bug1 无虚构分数，Bug2 无十六进制噪声；三项现象、根因、修复、验证准确。",
-        "recorded_at": "2026-06-28T13:38:38Z"
-      },
+      "status": "pending",
+      "dispatch": null,
+      "result": null,
       "blocker": null
     },
     {
       "slide_id": "slide_14",
       "number": 14,
-      "title": "日志与可观测性",
+      "title": "多级缓存与 singleflight",
       "job": "prompts/slide_14.json",
       "out": "origin_image/slide_14.png",
       "input_images": [
         {
-          "path": "/mnt/e/WangDao/Code/Cpp_Advanced/课件/07_搜索引擎项目/03_SearchEngine_V3.1/docs/ppt_output/SearchEngine_V3.1_项目汇报/origin_image/slide_10.png",
-          "role": "approved sample slide style reference",
-          "fidelity": "match palette, marker texture, handwritten Chinese mood and visual identity; increase information density moderately; do not copy the exact layout"
+          "path": "/home/lws/my_project/Cpp_Advanced/课件/07_搜索引擎项目/03_SearchEngine_V3.1/docs/ppt_output/SearchEngine_V3.1_项目汇报/style_samples/slide_10_A_手绘白板风.png",
+          "role": "approved hand-drawn whiteboard style reference",
+          "fidelity": "match warm whiteboard background, marker texture, handwritten Chinese mood, palette and visual identity; vary layout by slide role"
         }
       ],
       "requires_context_images": true,
-      "status": "recorded",
-      "dispatch": {
-        "agent_id": "/root/slide_14",
-        "agent_nickname": "slide_14",
-        "prompt": "prompts/slide_14.json",
-        "prompt_sha256": "26255d2b77be612b1133061d7ba45239c190603b297decb07b41f2ac3f3acfe5",
-        "dispatched_at": "2026-06-28T13:09:09Z"
-      },
-      "result": {
-        "agent_id": "/root/slide_14",
-        "backend_used": "built-in image tool",
-        "selected_source": "/mnt/c/Users/liwenshuo/.codex/generated_images/019f0e57-d361-7352-915f-7be9db0d4a83/exec-8102ba1e-9949-490c-823b-47cce449a474.png",
-        "selected_source_sha256": "a83df20f328ba74b82ddba0398c97670958508ed25bff3d40c4589f807d5d2a1",
-        "final_image": "origin_image/slide_14.png",
-        "final_image_sha256": "a83df20f328ba74b82ddba0398c97670958508ed25bff3d40c4589f807d5d2a1",
-        "expected_backend": "built-in image tool",
-        "expected_backend_labels": [
-          "built-in image tool",
-          "image_gen"
-        ],
-        "sample_generation_method_matched": true,
-        "qa_note": "日志分层、异步输出、离线/在线阶段耗时与真实字段格式准确，未虚构具体耗时。",
-        "recorded_at": "2026-06-28T13:19:22Z"
-      },
+      "status": "pending",
+      "dispatch": null,
+      "result": null,
       "blocker": null
     },
     {
       "slide_id": "slide_15",
       "number": 15,
-      "title": "性能优化结果",
+      "title": "W-TinyLFU 专项讲解",
       "job": "prompts/slide_15.json",
       "out": "origin_image/slide_15.png",
       "input_images": [
         {
-          "path": "/mnt/e/WangDao/Code/Cpp_Advanced/课件/07_搜索引擎项目/03_SearchEngine_V3.1/docs/ppt_output/SearchEngine_V3.1_项目汇报/origin_image/slide_10.png",
-          "role": "approved sample slide style reference",
-          "fidelity": "match palette, marker texture, handwritten Chinese mood and visual identity; increase information density moderately; do not copy the exact layout"
+          "path": "/home/lws/my_project/Cpp_Advanced/课件/07_搜索引擎项目/03_SearchEngine_V3.1/docs/ppt_output/SearchEngine_V3.1_项目汇报/style_samples/slide_10_A_手绘白板风.png",
+          "role": "approved hand-drawn whiteboard style reference",
+          "fidelity": "match warm whiteboard background, marker texture, handwritten Chinese mood, palette and visual identity; vary layout by slide role"
         }
       ],
       "requires_context_images": true,
-      "status": "recorded",
-      "dispatch": {
-        "agent_id": "/root/slide_15",
-        "agent_nickname": "slide_15",
-        "prompt": "prompts/slide_15.json",
-        "prompt_sha256": "6cd30ad107b05a6e126502c4e9d45aa8e092685b46187f380d7e4f0494afabdf",
-        "dispatched_at": "2026-06-28T13:13:16Z"
-      },
-      "result": {
-        "agent_id": "/root/slide_15",
-        "backend_used": "built-in image tool",
-        "selected_source": "/mnt/c/Users/liwenshuo/.codex/generated_images/019f0e5a-5a69-7243-93ab-7faba903933e/exec-48952156-f9d4-4044-8a85-af56d96750d6.png",
-        "selected_source_sha256": "003b4526086fb2ba673162d33cb98d52f65190de1873325f585afafa168ad6e1",
-        "final_image": "origin_image/slide_15.png",
-        "final_image_sha256": "003b4526086fb2ba673162d33cb98d52f65190de1873325f585afafa168ad6e1",
-        "expected_backend": "built-in image tool",
-        "expected_backend_labels": [
-          "built-in image tool",
-          "image_gen"
-        ],
-        "sample_generation_method_matched": true,
-        "qa_note": "QPS、P50/P95/P99、keep-alive 对比、单位及增减方向逐项核对，与 CSV 完全一致。",
-        "recorded_at": "2026-06-28T13:19:23Z"
-      },
+      "status": "pending",
+      "dispatch": null,
+      "result": null,
       "blocker": null
     },
     {
       "slide_id": "slide_16",
       "number": 16,
-      "title": "Git 与工程管理",
+      "title": "动态摘要",
       "job": "prompts/slide_16.json",
       "out": "origin_image/slide_16.png",
       "input_images": [
         {
-          "path": "/mnt/e/WangDao/Code/Cpp_Advanced/课件/07_搜索引擎项目/03_SearchEngine_V3.1/docs/ppt_output/SearchEngine_V3.1_项目汇报/origin_image/slide_10.png",
-          "role": "approved sample slide style reference",
-          "fidelity": "match palette, marker texture, handwritten Chinese mood and visual identity; increase information density moderately; do not copy the exact layout"
+          "path": "/home/lws/my_project/Cpp_Advanced/课件/07_搜索引擎项目/03_SearchEngine_V3.1/docs/ppt_output/SearchEngine_V3.1_项目汇报/style_samples/slide_10_A_手绘白板风.png",
+          "role": "approved hand-drawn whiteboard style reference",
+          "fidelity": "match warm whiteboard background, marker texture, handwritten Chinese mood, palette and visual identity; vary layout by slide role"
         }
       ],
       "requires_context_images": true,
-      "status": "recorded",
-      "dispatch": {
-        "agent_id": "/root/slide_16",
-        "agent_nickname": "slide_16",
-        "prompt": "prompts/slide_16.json",
-        "prompt_sha256": "cb6beedb901036328698b1b0a28cced96b4aee05cb1c220290e99f9acad6adaa",
-        "dispatched_at": "2026-06-28T13:22:45Z"
-      },
-      "result": {
-        "agent_id": "/root/slide_16",
-        "backend_used": "built-in image tool",
-        "selected_source": "/mnt/c/Users/liwenshuo/.codex/generated_images/019f0e64-1ba7-77d2-9ffd-bdc89ff63ae6/exec-ccd3bcfc-aea1-44c1-9776-eee6f410fd48.png",
-        "selected_source_sha256": "45bba2e3616e4cda758a9166545e91aac6e025a9fac7d86b4caa0041c48c8db3",
-        "final_image": "origin_image/slide_16.png",
-        "final_image_sha256": "45bba2e3616e4cda758a9166545e91aac6e025a9fac7d86b4caa0041c48c8db3",
-        "expected_backend": "built-in image tool",
-        "expected_backend_labels": [
-          "built-in image tool",
-          "image_gen"
-        ],
-        "sample_generation_method_matched": true,
-        "qa_note": "五个 Git 节点顺序、工程实践与教训准确，无虚构 hash 或日期。",
-        "recorded_at": "2026-06-28T13:38:39Z"
-      },
+      "status": "pending",
+      "dispatch": null,
+      "result": null,
       "blocker": null
     },
     {
       "slide_id": "slide_17",
       "number": 17,
-      "title": "现有不足与改进路线",
+      "title": "三个典型 Bug 与解决方案",
       "job": "prompts/slide_17.json",
       "out": "origin_image/slide_17.png",
       "input_images": [
         {
-          "path": "/mnt/e/WangDao/Code/Cpp_Advanced/课件/07_搜索引擎项目/03_SearchEngine_V3.1/docs/ppt_output/SearchEngine_V3.1_项目汇报/origin_image/slide_10.png",
-          "role": "approved sample slide style reference",
-          "fidelity": "match palette, marker texture, handwritten Chinese mood and visual identity; increase information density moderately; do not copy the exact layout"
+          "path": "/home/lws/my_project/Cpp_Advanced/课件/07_搜索引擎项目/03_SearchEngine_V3.1/docs/ppt_output/SearchEngine_V3.1_项目汇报/style_samples/slide_10_A_手绘白板风.png",
+          "role": "approved hand-drawn whiteboard style reference",
+          "fidelity": "match warm whiteboard background, marker texture, handwritten Chinese mood, palette and visual identity; vary layout by slide role"
         }
       ],
       "requires_context_images": true,
-      "status": "recorded",
-      "dispatch": {
-        "agent_id": "/root/slide_17",
-        "agent_nickname": "slide_17",
-        "prompt": "prompts/slide_17.json",
-        "prompt_sha256": "08b210b391c5f7efbb2ff2c11d95caae3479675c02f99fbdddb2b29940eadc59",
-        "dispatched_at": "2026-06-28T13:27:47Z"
-      },
-      "result": {
-        "agent_id": "/root/slide_17",
-        "backend_used": "built-in image tool",
-        "selected_source": "/mnt/c/Users/liwenshuo/.codex/generated_images/019f0e66-dab9-7691-8251-6a8d686f7f60/exec-f35dcc76-8960-4580-80f6-c4753fbb331f.png",
-        "selected_source_sha256": "f222bc07cee929a9f725a28a96ce0aa98740e24da1739766a77d928d50a49ea8",
-        "final_image": "origin_image/slide_17.png",
-        "final_image_sha256": "f222bc07cee929a9f725a28a96ce0aa98740e24da1739766a77d928d50a49ea8",
-        "expected_backend": "built-in image tool",
-        "expected_backend_labels": [
-          "built-in image tool",
-          "image_gen"
-        ],
-        "sample_generation_method_matched": true,
-        "qa_note": "P0–P3 顺序与评测/相关性/稳定性/规模化项目映射准确。",
-        "recorded_at": "2026-06-28T13:38:39Z"
-      },
+      "status": "pending",
+      "dispatch": null,
+      "result": null,
       "blocker": null
     },
     {
       "slide_id": "slide_18",
       "number": 18,
-      "title": "项目感悟与总结 / Q&A",
+      "title": "日志与可观测性",
       "job": "prompts/slide_18.json",
       "out": "origin_image/slide_18.png",
       "input_images": [
         {
-          "path": "/mnt/e/WangDao/Code/Cpp_Advanced/课件/07_搜索引擎项目/03_SearchEngine_V3.1/docs/ppt_output/SearchEngine_V3.1_项目汇报/origin_image/slide_10.png",
-          "role": "approved sample slide style reference",
-          "fidelity": "match palette, marker texture, handwritten Chinese mood and visual identity; increase information density moderately; do not copy the exact layout"
+          "path": "/home/lws/my_project/Cpp_Advanced/课件/07_搜索引擎项目/03_SearchEngine_V3.1/docs/ppt_output/SearchEngine_V3.1_项目汇报/style_samples/slide_10_A_手绘白板风.png",
+          "role": "approved hand-drawn whiteboard style reference",
+          "fidelity": "match warm whiteboard background, marker texture, handwritten Chinese mood, palette and visual identity; vary layout by slide role"
         }
       ],
       "requires_context_images": true,
-      "status": "recorded",
-      "dispatch": {
-        "agent_id": "/root/slide_18",
-        "agent_nickname": "slide_18",
-        "prompt": "prompts/slide_18.json",
-        "prompt_sha256": "ec94bd09d07578e6c322e4b92b43d66db3d3d00f5871bde971af9327cebf912e",
-        "dispatched_at": "2026-06-28T13:32:57Z"
-      },
-      "result": {
-        "agent_id": "/root/slide_18",
-        "backend_used": "built-in image tool",
-        "selected_source": "/mnt/c/Users/liwenshuo/.codex/generated_images/019f0e6d-1097-7a73-b393-a14edc28db2f/exec-9b575223-e040-481f-ac28-db3dcf24162f.png",
-        "selected_source_sha256": "14fb8a99e3f8839f40a6caa7c8b7fc14c8d1ab798d573e9b1482989395c8b182",
-        "final_image": "origin_image/slide_18.png",
-        "final_image_sha256": "14fb8a99e3f8839f40a6caa7c8b7fc14c8d1ab798d573e9b1482989395c8b182",
-        "expected_backend": "built-in image tool",
-        "expected_backend_labels": [
-          "built-in image tool",
-          "image_gen"
-        ],
-        "sample_generation_method_matched": true,
-        "qa_note": "总结主线与 BM25/W-TinyLFU/Keep-Alive/Q&A 完整，无联系方式或页码。",
-        "recorded_at": "2026-06-28T13:38:40Z"
-      },
+      "status": "pending",
+      "dispatch": null,
+      "result": null,
+      "blocker": null
+    },
+    {
+      "slide_id": "slide_19",
+      "number": 19,
+      "title": "性能优化结果",
+      "job": "prompts/slide_19.json",
+      "out": "origin_image/slide_19.png",
+      "input_images": [
+        {
+          "path": "/home/lws/my_project/Cpp_Advanced/课件/07_搜索引擎项目/03_SearchEngine_V3.1/docs/ppt_output/SearchEngine_V3.1_项目汇报/style_samples/slide_10_A_手绘白板风.png",
+          "role": "approved hand-drawn whiteboard style reference",
+          "fidelity": "match warm whiteboard background, marker texture, handwritten Chinese mood, palette and visual identity; vary layout by slide role"
+        }
+      ],
+      "requires_context_images": true,
+      "status": "pending",
+      "dispatch": null,
+      "result": null,
+      "blocker": null
+    },
+    {
+      "slide_id": "slide_20",
+      "number": 20,
+      "title": "Git 与工程管理",
+      "job": "prompts/slide_20.json",
+      "out": "origin_image/slide_20.png",
+      "input_images": [
+        {
+          "path": "/home/lws/my_project/Cpp_Advanced/课件/07_搜索引擎项目/03_SearchEngine_V3.1/docs/ppt_output/SearchEngine_V3.1_项目汇报/style_samples/slide_10_A_手绘白板风.png",
+          "role": "approved hand-drawn whiteboard style reference",
+          "fidelity": "match warm whiteboard background, marker texture, handwritten Chinese mood, palette and visual identity; vary layout by slide role"
+        }
+      ],
+      "requires_context_images": true,
+      "status": "pending",
+      "dispatch": null,
+      "result": null,
+      "blocker": null
+    },
+    {
+      "slide_id": "slide_21",
+      "number": 21,
+      "title": "现有不足与改进路线",
+      "job": "prompts/slide_21.json",
+      "out": "origin_image/slide_21.png",
+      "input_images": [
+        {
+          "path": "/home/lws/my_project/Cpp_Advanced/课件/07_搜索引擎项目/03_SearchEngine_V3.1/docs/ppt_output/SearchEngine_V3.1_项目汇报/style_samples/slide_10_A_手绘白板风.png",
+          "role": "approved hand-drawn whiteboard style reference",
+          "fidelity": "match warm whiteboard background, marker texture, handwritten Chinese mood, palette and visual identity; vary layout by slide role"
+        }
+      ],
+      "requires_context_images": true,
+      "status": "pending",
+      "dispatch": null,
+      "result": null,
+      "blocker": null
+    },
+    {
+      "slide_id": "slide_22",
+      "number": 22,
+      "title": "项目感悟与总结 / Q&A",
+      "job": "prompts/slide_22.json",
+      "out": "origin_image/slide_22.png",
+      "input_images": [
+        {
+          "path": "/home/lws/my_project/Cpp_Advanced/课件/07_搜索引擎项目/03_SearchEngine_V3.1/docs/ppt_output/SearchEngine_V3.1_项目汇报/style_samples/slide_10_A_手绘白板风.png",
+          "role": "approved hand-drawn whiteboard style reference",
+          "fidelity": "match warm whiteboard background, marker texture, handwritten Chinese mood, palette and visual identity; vary layout by slide role"
+        }
+      ],
+      "requires_context_images": true,
+      "status": "pending",
+      "dispatch": null,
+      "result": null,
       "blocker": null
     }
   ],
-  "updated_at": "2026-06-28T13:38:40Z"
+  "updated_at": "2026-06-28T15:36:50Z"
 }

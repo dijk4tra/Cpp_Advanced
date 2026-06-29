@@ -82,15 +82,19 @@ curl -s -X POST http://127.0.0.1:18888/api/search \
 
 ### PPT 放什么
 
-```text
-Pandex SearchEngine
-离线建库、BM25 检索、关键词推荐与多级缓存
-```
+- 唯一主标题：`Pandex SearchEngine`。
+- 保留第一版封面的三段全景结构，而不是当前极简的“数据库—放大镜—结果”结构：
+  - 左侧“离线建库”：原始语料经过清洗、分词、去重，生成词典/字符索引、`pages.dat`、`offsets.dat`、BM25 倒排索引和文档统计。
+  - 中央“搜索引擎”：突出“忽略 OOV → OR 召回 → BM25 排序 → TopK → 动态摘要”。
+  - 右侧“在线服务”：TLV/HTTP 入口，以及 W-TinyLFU、Redis L2、singleflight、keep-alive、spdlog。
+- 底部保留三个短标签：`离线建库`、`BM25 检索`、`关键词推荐与多级缓存`，以及结论便利贴 `数据 + 算法 + 工程`。
+- 信息量比第一版减少约 25%，但必须明显高于当前极简版；不放虚构网页结果、文件扩展名、人物、版本号、汇报人和日期。
+- 布局参考：`docs/ppt_output/SearchEngine_V3.1_项目汇报/style_samples/slide_01_first_version_layout_reference.png`。只参考三段布局和密度，文字与模块必须按当前代码纠正。
 
 ### 口头讲稿
 
-“我汇报的项目是 Pandex SearchEngine。它不只是一个可以输入关键词的页面，而是包含
-离线建库、在线推荐和搜索、TLV/HTTP 网络服务、两级缓存以及日志与压测的完整小型搜索引擎。”
+“我汇报的项目是 Pandex SearchEngine。封面展示的是项目的完整主线：左侧把原始语料构造成在线可加载的数据，
+中央完成 OR 召回、BM25 排序和动态摘要，右侧通过 TLV 和 HTTP 对外提供推荐与搜索，并由多级缓存和日志系统支撑。”
 
 ---
 
@@ -423,8 +427,8 @@ if (it == inFlight_.end()) {
 
 ### 口头讲稿
 
-“W-TinyLFU 的重点是不让只访问一次的扫描 key 把真正热点挤出缓存。singleflight 则解决缓存击穿：
-当多个请求同时访问一个冷 key，只有 owner 执行搜索，其他线程等待并复用结果。”
+“这一页只讲请求怎样穿过 L1、Redis L2 和 singleflight。当多个请求同时访问一个冷 key，
+只有 owner 执行搜索，其他线程等待并复用结果；L1 内部如何准入和淘汰，留到下一页单独展开。”
 
 ---
 
@@ -474,7 +478,7 @@ l1_wtinylfu_frequency_sample_multiplier = 10
 5. 窗口分数为 `totalHits * positionWeight + coverageBonus + closeBonus`。
 6. 位置权重：正文前 20% 为 **1.30**，后 20% 为 **1.15**，中间 60% 为 **1.00**。
 7. 覆盖率最高增加 10 分；至少命中 2 个关键词且首尾距离 ≤ 40 字符时增加 5 分紧密度奖励。
-8. 返回最高分窗口，最后对查询词做 `<em>` 高亮；本页不展开前端安全处理。
+8. 返回最高分窗口；本页到此结束，不扩展展示层处理。
 
 ### 实际代码摘录
 
@@ -754,14 +758,14 @@ W-TinyLFU 用 Window 接纳新数据，再用估算频率决定是否进入 Main
 | `01_system_architecture.mmd` | 总体架构 | 3 |
 | `02_offline_pipeline.mmd` | 离线建库流程 | 6 |
 | `03_module_class_diagram.mmd` | 主要类与依赖 | 7 |
-| `04_online_search_flow.mmd` | OR + BM25 + 按需读取 + 摘要 | 10 |
-| `05_cache_request_flow.mmd` | L1/L2/singleflight 请求链 | 11 |
-| `06_wtinylfu_admission.mmd` | W-TinyLFU 准入与淘汰 | 备用 |
-| `07_singleflight_sequence.mmd` | 同 key 冷请求时序 | 备用 |
-| `08_bug_and_to_or.mmd` | 严格 AND 修复对比 | 13 |
-| `09_bug_utf8_edit_distance.mmd` | UTF-8 字节距离到字符距离 | 13 |
-| `10_bug_tlv_stream_framing.mmd` | TLV 半包、粘包与安全解码 | 13 |
-| `benchmark_data.csv` | V3/V3.1 QPS 和延迟作图数据 | 15 |
+| `04_online_search_flow.mmd` | OR + BM25 + 按需读取 + 摘要 | 13 |
+| `05_cache_request_flow.mmd` | L1/L2/singleflight 请求链 | 14 |
+| `06_wtinylfu_admission.mmd` | W-TinyLFU 准入与淘汰 | 15 |
+| `07_singleflight_sequence.mmd` | 同 key 冷请求时序 | 14 |
+| `08_bug_and_to_or.mmd` | 严格 AND 修复对比 | 17 |
+| `09_bug_utf8_edit_distance.mmd` | UTF-8 字节距离到字符距离 | 17 |
+| `10_bug_tlv_stream_framing.mmd` | TLV 半包、粘包与安全解码 | 17 |
+| `benchmark_data.csv` | V3/V3.1 QPS 和延迟作图数据 | 19 |
 
 ### Mermaid 导出建议
 
@@ -773,7 +777,7 @@ W-TinyLFU 用 Window 接纳新数据，再用估算频率决定是否进入 Main
 ## 6. PPT 排版与截图建议
 
 - 主色使用 1 种深色 + 1 种高亮色，与前端的黑/黄视觉保持一致。
-- 架构图和流程图每页只强调一条主线，不要把 8 张 Mermaid 图都放进主汇报。
+- 架构图和流程图每页只强调一条主线，不要把全部 Mermaid 图都挤进同一页。
 - 代码截图保留函数名和 8～15 行核心逻辑，删除 include 和大段注释。
 - Bug 页使用“现象—根因—修复—验证”四列表，比只放一张代码截图更有说服力。
 - 性能页从 `benchmark_data.csv` 生成两张图：QPS 用分组柱状图，P50/P95/P99 用延迟柱状图。

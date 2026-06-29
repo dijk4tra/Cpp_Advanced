@@ -1,0 +1,42 @@
+{
+  "slide": 21,
+  "title": "现有不足与改进路线",
+  "prompt": "# Codex PPT Slide Image Prompt\n\n## Canvas\n{\n  \"type\": \"16:9 full-slide PowerPoint image\",\n  \"language\": \"Chinese\",\n  \"slide_number\": 21,\n  \"render_slide_number\": false\n}\n\n## Deck Goal\n面向课程项目答辩，在 15–18 分钟内说清 Pandex SearchEngine 的离线建库、四组核心数据结构、推荐与检索算法、动态摘要、W-TinyLFU、工程优化、性能证据与改进路线。\n\n## Required Background\n{\n  \"deck_context\": {\n    \"source_summary\": \"Pandex SearchEngine 是 C++ 实现的小型搜索引擎：离线构建中英文词典、字符索引、网页库、偏移库和 BM25 倒排索引；在线通过 TLV 和 HTTP 提供推荐与搜索，并使用 W-TinyLFU、Redis L2、singleflight、keep-alive 和 spdlog。\",\n    \"core_claim\": \"搜索效果由离线数据、召回边界、排序质量和系统工程共同决定；正确性、缓存策略、可观测性和对照实验都是交付的一部分。\",\n    \"canonical_terms\": [\n      \"Pandex SearchEngine\",\n      \"OR 召回\",\n      \"BM25\",\n      \"W-TinyLFU\",\n      \"Redis L2\",\n      \"singleflight\",\n      \"HTTP keep-alive\",\n      \"动态摘要\",\n      \"UTF-8\",\n      \"TLV\"\n    ]\n  },\n  \"slide_local_context\": {\n    \"required_background\": \"当前不足包括 SimHash O(n²)、BM25 只索引正文、OR 候选可能过大、推荐缺少行为信号、L1 按 key 数容量、同步 Redis/文件 I/O、Redis 无熔断与分层 metrics、索引发布非原子。\"\n  }\n}\n\n## Global Style\n{\n  \"name\": \"高信息密度手绘白板风\",\n  \"visual_direction\": \"真实温暖的浅米白白板，整洁黑色马克笔中文，蓝红橙绿少量标注；像优秀算法老师边画边讲，技术严谨但不幼稚。\",\n  \"color_palette\": \"warm off-white #FAFAF5; black marker main text; blue #3498DB structure; red #E74C3C conclusions and risks; orange #F39C12 metrics; green #27AE60 successful paths; yellow sticky notes #FFF3A6\",\n  \"typography\": \"large neat handwritten Chinese marker titles; compact but legible body text; accurate C++ types, Latin terms, formulas and numerical values\",\n  \"texture_and_finish\": \"clean photographed whiteboard surface with restrained marker strokes, eraser traces, arrows, frames and sticky notes\",\n  \"density_rule\": \"moderately high density with clear grouping; use the full 16:9 canvas; split content by semantic zones instead of shrinking all text\",\n  \"layout_variation\": \"vary composition among panorama, dual pipeline, module anatomy, algorithm flow, sequence, comparison, chart evidence, timeline and roadmap\"\n}\n\n## Input Images\n\n- Image 1: /home/lws/my_project/Cpp_Advanced/课件/07_搜索引擎项目/03_SearchEngine_V3.1/docs/ppt_output/SearchEngine_V3.1_项目汇报/style_samples/slide_10_A_手绘白板风.png — approved hand-drawn whiteboard style reference; match warm whiteboard background, marker texture, handwritten Chinese mood, palette and visual identity; vary layout by slide role\n\n\n## Slide\n{\n  \"number\": 21,\n  \"title\": \"现有不足与改进路线\",\n  \"role\": \"roadmap\",\n  \"intent\": \"把不足按 P0–P3 排出可执行顺序\"\n}\n\n## Text\n{\n  \"title\": \"现有不足与改进路线\",\n  \"key_points\": [\n    \"P0：查询评测集 + 分层 metrics + 索引原子发布\",\n    \"P1：BM25F + SimHash 分桶 + topK heap/WAND\",\n    \"P2：行为推荐 + Redis 熔断/异步化\",\n    \"P3：多机分片 + 增量索引 + 分布式部署\"\n  ],\n  \"speaker_focus\": null\n}\n\n## Layout\n{\n  \"composition\": \"左侧不足→影响→方案映射，右侧 P0–P3 阶梯路线\"\n}\n\n## Visual Elements\n{\n  \"main_visual\": \"问题到方案的优先级路线图\",\n  \"supporting_elements\": \"风险、成本、收益小标签\"\n}\n\n## Constraints\n[\n  \"清楚区分当前能力与未来方案\",\n  \"优先 3840x2160\"\n]\n\n## Style Reference Rule\nUse Image 1 as the approved sample-slide style reference. Match its palette, typography mood, density, texture, and overall visual identity. Do not copy its exact layout unless this slide's layout explicitly asks for it.\n\n## Input Image Handling Rules\nFor any input image marked as a strict input asset, include it visibly and preserve its content. Do not redraw, replace, relabel, or invent a similar figure. Scale and crop only as needed for composition while keeping the important labels, arrows, data, and relationships recognizable.\n\n## Universal Constraints\n- The final image itself must contain the title and key points.\n- Render Chinese text exactly and legibly; avoid garbled characters.\n- Keep the confirmed deck style consistent while varying layout by slide role.\n- No watermark, unrelated logo, or extra slide number.\n",
+  "out": "slide_21.png",
+  "input_images": [
+    {
+      "path": "/home/lws/my_project/Cpp_Advanced/课件/07_搜索引擎项目/03_SearchEngine_V3.1/docs/ppt_output/SearchEngine_V3.1_项目汇报/style_samples/slide_10_A_手绘白板风.png",
+      "role": "approved hand-drawn whiteboard style reference",
+      "fidelity": "match warm whiteboard background, marker texture, handwritten Chinese mood, palette and visual identity; vary layout by slide role"
+    }
+  ],
+  "requires_context_images": true,
+  "expected_backend": "built-in image tool",
+  "sample_generation_method": {
+    "backend_used": "built-in image tool",
+    "tool_name": "image_gen",
+    "mode": "generate",
+    "prompt_source": "style_samples/slide_10_A_手绘白板风.png 对应的已确认风格样页",
+    "size": "16:9 landscape; dense slides should request 3840x2160 when the selected backend supports it",
+    "quality": "high",
+    "approved_sample_path": "/home/lws/my_project/Cpp_Advanced/课件/07_搜索引擎项目/03_SearchEngine_V3.1/docs/ppt_output/SearchEngine_V3.1_项目汇报/style_samples/slide_10_A_手绘白板风.png",
+    "input_context_preparation": "生成前先查看风格样页；封面还要查看第一版布局参考图",
+    "handoff_rule": "后续生成必须保持同一手绘白板视觉系统；不可用时应报告阻塞，不得改用程序绘图替代。"
+  },
+  "generation_contract": {
+    "must_use_selected_image_backend": true,
+    "must_match_sample_generation_method": true,
+    "forbidden_final_image_methods": [
+      "local drawing/rendering scripts",
+      "Pillow-generated slides",
+      "SVG/HTML/CSS/canvas screenshots",
+      "python-pptx/PptxGenJS/native PPT layout screenshots",
+      "manually composited text/image overlays"
+    ],
+    "must_return": [
+      "backend_used",
+      "selected_source",
+      "qa_note"
+    ]
+  }
+}
